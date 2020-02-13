@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+.vscode/
+
+conf_eth/log/
+conf_btc/log/
+conf_prop/log/
