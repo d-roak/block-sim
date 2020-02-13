@@ -8,7 +8,6 @@ import yaml
 import random
 import pickle
 import hashlib
-import time
 import json
 import math
 import statistics
@@ -24,8 +23,8 @@ STATUS_MSG, NEWBLOCKHASHES_MSG, TRANSACTIONS_MSG, GETBLOCKHEADERS_MSG, BLOCKHEAD
 "0x00 STATUS", "0x01 NEWBLOCKHASHES", "0x02 TRANSACTIONS", "0x03 GETBLOCKHEADERS", "0x04 BLOCKHEADERS", "0x05 GETBLOCKBODIES", "0x06 BLOCKBODIES", "0x07 NEWBLOCK"
 
 
-CURRENT_CYCLE, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, TABLE, BLOCKCHAIN, \
-BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, ANN_TXS, SENT_STATUS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, TABLE, BLOCKCHAIN, \
+BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, ANN_TXS, SENT_STATUS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 
 # used only to check if the node is already in the network
 # nodes don't have an overview of the network
@@ -144,6 +143,7 @@ def CYCLE(self):
 				nodeState[self][DISS_MSGS_SENT] += 1
 
 	nodeState[self][CURRENT_CYCLE] += 1
+	nodeState[self][CURRENT_TIME] += nodeCycle
 	if nodeState[self][CURRENT_CYCLE] < nbCycles:
 		sim.schedulleExecution(CYCLE, self)
 
@@ -184,7 +184,7 @@ def PING(self, source, msg):
 	#logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	#nodeState[self][MEMB_MSGS_RECEIVED] += 1
 	addEntryDb(self, source)
-	updateEntryPingDb(self, source, time.time())
+	updateEntryPingDb(self, source, nodeState[self][CURRENT_TIME])
 
 	sim.send(PONG, source, self, PONG_MSG)
 	#nodeState[self][MEMB_MSGS_SENT] += 1
@@ -195,7 +195,7 @@ def PONG(self, source, msg):
 	#nodeState[self][MEMB_MSGS_RECEIVED] += 1
 
 	addEntryDb(self, source)
-	updateEntryPongDb(self, source, time.time())
+	updateEntryPongDb(self, source, nodeState[self][CURRENT_TIME])
 
 
 def FINDNODE(self, source, msg, target):
@@ -390,7 +390,7 @@ def addEntryDb(self, node):
 	if node in nodeState[self][DB] or self == node:
 		return
 
-	currentTime = time.time()
+	currentTime = nodeState[self][CURRENT_TIME]
 	nodeState[self][DB][node] = (currentTime, currentTime, 0)
 
 def removeEntryDb(self, node):
@@ -470,7 +470,7 @@ def lifeCheckDbTable(self):
 	# if node fails to respond to findnode more than 4 times in a row, it will be removed from the table
 
 	for k in nodeState[self][DB]:
-		currentTime = time.time()
+		currentTime = nodeState[self][CURRENT_TIME]
 		if currentTime - nodeState[self][DB][k][1] > 24 * 60 * 1000:
 			removeEntryDb(self, k)
 			continue
@@ -509,7 +509,7 @@ def lookup(self, target, stopMatch):
 			if pendingQueries >= alpha:
 				break
 			if n not in asked.keys():
-				asked[n] = time.time()
+				asked[n] = nodeState[self][CURRENT_TIME]
 				pendingQueries += 1
 				addEntryDb(self, n)
 				addEntryBucket(self, n)
@@ -537,7 +537,7 @@ def lookup(self, target, stopMatch):
 			if asked[n] == 0:
 				continue
 
-			t = (time.time() - asked[n]) * 1000
+			t = (nodeState[self][CURRENT_TIME] - asked[n]) * 1000
 			if t > lookupTimeout:
 				pendingQueries = 0
 
@@ -570,7 +570,7 @@ def generateBlock(self, txs):
 	mt.make_tree()
 
 	number = nodeState[self][BLOCKCHAIN][-1].getNumber() + 1
-	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), time.time())
+	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), nodeState[self][CURRENT_TIME])
 	body = (mt.get_proof(0), txs)
 	block = Block(number, header, body)
 	return block

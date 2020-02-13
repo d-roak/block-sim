@@ -7,7 +7,6 @@ import sys
 import yaml
 import random
 import pickle
-import time
 import json
 import math
 import hashlib
@@ -56,7 +55,7 @@ def CYCLE(self):
 			join(self)
 	else:
 		# lifecheck and cycle ping
-		# lifeCheckDBNeighbs(self)
+		lifeCheckDBNeighbs(self)
 		for n in nodeState[self][CONNS]:
 			sim.send(PING, n, self, PING_MSG)
 			nodeState[self][MEMB_MSGS_SENT] += 1
@@ -122,7 +121,7 @@ def CYCLE(self):
 					nodeState[self][DISS_MSGS_SENT] += 1
 
 	nodeState[self][CURRENT_CYCLE] += 1
-	nodeState[self][CURRENT_TIME] += 1000
+	nodeState[self][CURRENT_TIME] += nodeCycle
 	if nodeState[self][CURRENT_CYCLE] < nbCycles:
 		sim.schedulleExecution(CYCLE, self)
 
@@ -178,7 +177,7 @@ def PONG(self, source, msg):
 
 	if source not in nodeState[self][CONNS]:
 		return
-	updateEntryPong(self, source, time.time())
+	updateEntryPong(self, source, nodeState[self][CURRENT_TIME])
 
 
 def VERSION(self, source, msg):
@@ -370,7 +369,7 @@ def createNode(id):
 def addConn(self, node):
 	if self == node:
 		return
-	nodeState[self][CONNS][node] = time.time()
+	nodeState[self][CONNS][node] = nodeState[self][CURRENT_TIME]
 
 def connsCount(self):
 	return len(nodeState[self][CONNS])
@@ -389,9 +388,15 @@ def createSample(self):
 	
 	return sample
 
+def lifeCheckDBNeighbs(self):
+	# Cycles of 1sec 60*90 = 90min
+	for n in nodeState[self][CONNS]:
+		if nodeState[self][CURRENT_TIME] - nodeState[self][CONNS][n] > 60 * 90:
+			del nodeState[self][CONNS][n]
+
 # Blockchain methods
 def generateGenesisBlock():
-	header = ("0", "0", 1231006505)
+	header = ("0", "0", 0)
 	body = ("0", [])
 	return Block(header, body)
 
@@ -405,7 +410,7 @@ def generateBlock(self, txs):
 		mt.add_leaf(t.getHash(), True)
 	mt.make_tree()
 
-	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), time.time())
+	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), nodeState[self][CURRENT_TIME])
 	body = (mt.get_proof(0), txs)
 	block = Block(header, body)
 	return block

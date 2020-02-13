@@ -9,7 +9,6 @@ import yaml
 import random
 import pickle
 import json
-import time
 import math
 import merkletools
 import statistics
@@ -24,9 +23,9 @@ PING_MSG, PONG_MSG, FINDNODE_MSG, NEIGHBORS_MSG, CONNECT_MSG, ACKCONNECT_MSG, RE
 STATUS_MSG, BLOCKHASHES_MSG, GETBLOCKS_MSG, BLOCK_MSG, TXS_MSG, PRUNE_MSG = \
 "STATUS", "BLOCKHASHES", "GETBLOCKS", "BLOCK", "TRANSACTIONS", "PRUNE"
 
-CURRENT_CYCLE, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, NEIGHBS, \
+CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, NEIGHBS, \
 BTREE, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, QUEUED_TXS, QUEUED_BLOCKS, SENT_STATUS = \
-0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
 
 EAGER, LAZY = 0, 1
 
@@ -119,6 +118,7 @@ def CYCLE(self):
 					nodeState[self][DISS_MSGS_SENT] += 1
 		
 	nodeState[self][CURRENT_CYCLE] += 1
+	nodeState[self][CURRENT_TIME] += nodeCycle
 	if nodeState[self][CURRENT_CYCLE] < nbCycles:
 		sim.schedulleExecution(CYCLE, self)
 
@@ -171,7 +171,7 @@ def PONG(self, source, msg):
 	#logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	#nodeState[self][MSGS_RECEIVED] += 1
 
-	updateEntryPongDB(self, source, time.time())
+	updateEntryPongDB(self, source, nodeState[self][CURRENT_TIME])
 
 def FINDNODE(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
@@ -346,7 +346,7 @@ def addEntryDB(self, node):
 	if node in nodeState[self][DB] or self == node:
 		return
 
-	nodeState[self][DB][node] = time.time()
+	nodeState[self][DB][node] = nodeState[self][CURRENT_TIME]
 
 def removeEntryDB(self, node):
 	del nodeState[self][DB][node]
@@ -402,7 +402,7 @@ def lifeCheckDBNeighbs(self):
 	# (it will never happen in the simulation)
 	# if node fails to respond more than 4 times in a row, it will be removed from the table
 	for n in nodeState[self][DB]:
-		currentTime = time.time()
+		currentTime = nodeState[self][CURRENT_TIME]
 		if currentTime - nodeState[self][DB][n] > 86400:
 			removeEntryDB(self, n)
 
@@ -489,7 +489,7 @@ def generateBlock(self, txs):
 	mt.make_tree()
 
 	number = nodeState[self][BLOCKCHAIN][-1].getNumber() + 1
-	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), time.time())
+	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), nodeState[self][CURRENT_TIME])
 	body = (mt.get_proof(0), txs)
 	block = Block(number, header, body)
 	return block
