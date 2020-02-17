@@ -43,6 +43,6 @@ lookupTimeout: 100
 floodPercentage: 1
 maxBlockHeaders: 100
 probTxCreate: 0.5
-maxTxCreate: 10
+maxTxCreate: 1
 miners: 5
-minTxPerBlock: 500
+minTxPerBlock: 100

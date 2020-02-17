@@ -34,6 +34,7 @@ EAGER, LAZY = 0, 1
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
 TX_NUMBER = 0
+BLOCK_NUMBER = 0
 
 def init():
 	global nodeState
@@ -51,7 +52,7 @@ def improve_performance(cycle):
 		del gc.garbage[:]
 
 def CYCLE(self):
-	global nodeState, TX_NUMBER
+	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
 	if self not in nodeState:
 		return
@@ -105,9 +106,9 @@ def CYCLE(self):
 		# Create block & Txs
 		# Stop creating blocks and txs at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
-			if random.random() > probTxCreate:
+			if random.random() <= probTxCreate:
 				newTxs = []
-				for _ in range(0, int(random.random()*maxTxCreate)):
+				for _ in range(0, 1+int(random.random()*maxTxCreate)):
 					t = generateTx(TX_NUMBER)
 					TX_NUMBER += 1
 					nodeState[self][KNOWN_TXS][t.getHash()] = t
@@ -116,13 +117,17 @@ def CYCLE(self):
 				for n in nodeState[self][NEIGHBS]:
 					sim.send(TXS, n, self, TXS_MSG, newTxs)
 					nodeState[self][DISS_MSGS_SENT] += 1
-			if len(nodeState[self][QUEUED_TXS]) > minTxPerBlock and self >= 0 and self <= miners:
+			if len(nodeState[self][QUEUED_TXS]) > minTxPerBlock and self < miners:
 				b = generateBlock(self, nodeState[self][QUEUED_TXS])
+				BLOCK_NUMBER += 1				
 				nodeState[self][QUEUED_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 				nodeState[self][QUEUED_BLOCKS].append(b)
-				for n in nodeState[self][NEIGHBS]:
+				for n in nodeState[self][BTREE][EAGER]:
 					sim.send(BLOCK, n, self, BLOCK_MSG, b)
+					nodeState[self][DISS_MSGS_SENT] += 1
+				for n in nodeState[self][BTREE][LAZY]:
+					sim.send(BLOCKHASHES, n, self, BLOCKHASHES_MSG, [b.getHash()])
 					nodeState[self][DISS_MSGS_SENT] += 1
 		
 	nodeState[self][CURRENT_CYCLE] += 1
@@ -322,14 +327,14 @@ def GRAFT(self, source, msg):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	addEntryDB(self, source)
-	graftBTree(self, source)
+	graftBTree(self, source, message=False)
 
 def PRUNE(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	addEntryDB(self, source)
-	pruneBTree(self, source)
+	pruneBTree(self, source, message=False)
 
 
 # Node functions
@@ -442,20 +447,22 @@ def updateBTree(self):
 			graftBTree(self, c)
 
 
-def graftBTree(self, grafted):
+def graftBTree(self, grafted, message=True):
 	if grafted in nodeState[self][BTREE][LAZY]: 
 		nodeState[self][BTREE][LAZY].remove(grafted)
 	if grafted not in nodeState[self][BTREE][EAGER]:
 		nodeState[self][BTREE][EAGER].append(grafted)
-		sim.send(GRAFT, grafted, self, GRAFT_MSG)
-		nodeState[self][DISS_MSGS_SENT] += 1
+		if message:
+			sim.send(GRAFT, grafted, self, GRAFT_MSG)
+			nodeState[self][DISS_MSGS_SENT] += 1
 
 
-def pruneBTree(self, pruned):
+def pruneBTree(self, pruned, message=True):
 	if pruned in nodeState[self][BTREE][EAGER]:
 		nodeState[self][BTREE][EAGER].remove(pruned)
-		sim.send(PRUNE, pruned, self, PRUNE_MSG)
-		nodeState[self][DISS_MSGS_SENT] += 1
+		if message:
+			sim.send(PRUNE, pruned, self, PRUNE_MSG)
+			nodeState[self][DISS_MSGS_SENT] += 1
 	if pruned not in nodeState[self][BTREE][LAZY]:
 		nodeState[self][BTREE][LAZY].append(pruned)
 	updateBTree(self)
@@ -651,25 +658,17 @@ def wrapup(dir):
 	for n in nodeState:
 		#db = []
 		neighbs = {}
-		blockchain_local = []
 		lat_sum = 0
 		
 		if n not in conns_bound:
 			conns_bound[n] = [1, neighbsSize(n)]
 
-		if len(REAL_BLOCKCHAIN) == len(nodeState[n][BLOCKCHAIN]): 
-			bc_right = True
-		else:
-			bc_right = False
-			bc_wrong += 1
-		for i, b in enumerate(nodeState[n][BLOCKCHAIN]):
-			blockchain_local.append({
-				"prev_hash": b.getHeader()[0],
-				"hash": b.getHash(),
-			})
-			if bc_right and REAL_BLOCKCHAIN[i] and REAL_BLOCKCHAIN[i].getHash() != b.getHash():
+		bc_right = True
+		for b in REAL_BLOCKCHAIN:
+			if b not in nodeState[n][BLOCKCHAIN]:
 				bc_right = False
 				bc_wrong += 1
+				break
 
 		#for i in nodeState[n][DB]:
 		#	db.append(i)
@@ -698,7 +697,7 @@ def wrapup(dir):
 			"peer_avg_latency": "%0.1f ms" % (avg_latency),
 			"blockchain_right": bc_right,
 			#"blockchain_local": blockchain_local,
-			#"known_blocks": list(nodeState[n][KNOWN_BLOCKS].keys()),
+			"known_blocks": len(list(nodeState[n][KNOWN_BLOCKS].keys())),
 			#"known_txs": list(nodeState[n][KNOWN_TXS].keys()),
 			#"db": db,
 			"neighbs": neighbs,
@@ -732,8 +731,9 @@ def wrapup(dir):
 		"inbound_avg_latency": "%0.1f ms" % (lat_in_sum/sum(map(lambda x : conns_bound[x][0], conns_bound))),
 		"outbound_avg_latency": "%0.1f ms" % (lat_out_sum/sum(map(lambda x : conns_bound[x][1], conns_bound))),
 		"blockchain_wrong": bc_wrong,
+		"blockchain_len": len(REAL_BLOCKCHAIN),
+		"total_blocks": BLOCK_NUMBER,
 		"total_txs": TX_NUMBER,
-		"total_blocks": len(REAL_BLOCKCHAIN),
 		#"blockchain": blockchain,
 	})
 

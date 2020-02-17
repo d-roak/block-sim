@@ -75,8 +75,8 @@ def CYCLE(self):
 
 		# Blockchain maintenance
 		# Create transactions
-		if random.random() > probTxCreate:
-			for _ in range(0, int(random.random()*maxTxCreate)):
+		if random.random() <= probTxCreate:
+			for _ in range(0, 1+int(random.random()*maxTxCreate)):
 				t = generateTx(TX_NUMBER)
 				TX_NUMBER += 1
 				nodeState[self][KNOWN_TXS][t.getHash()] = t
@@ -112,7 +112,7 @@ def CYCLE(self):
 		# Create block
 		# Stop creating blocks at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
-			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self >= 0 and self <= miners:
+			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
 				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
 				nodeState[self][KNOWN_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
@@ -582,19 +582,12 @@ def wrapup(dir):
 		#known_txs = []
 		lat_sum = 0
 
-		if len(REAL_BLOCKCHAIN) == len(nodeState[n][BLOCKCHAIN]): 
-			bc_right = True
-		else:
-			bc_right = False
-			bc_wrong += 1
-		for i, b in enumerate(nodeState[n][BLOCKCHAIN]):
-			#blockchain_local.append({
-			#	"prev_hash": b.getHeader()[0],
-			#	"hash": b.getHash(),
-			#})
-			if bc_right and REAL_BLOCKCHAIN[i] and REAL_BLOCKCHAIN[i].getHash() != b.getHash():
+		bc_right = True
+		for b in REAL_BLOCKCHAIN:
+			if b not in nodeState[n][BLOCKCHAIN]:
 				bc_right = False
 				bc_wrong += 1
+				break
 
 		#for _, b in nodeState[n][KNOWN_BLOCKS].items():
 		#	known_blocks.append(b.getHash())
@@ -652,8 +645,8 @@ def wrapup(dir):
 		"inbound_avg_latency": "%0.1f ms" % (lat_in_sum/sum(map(lambda x : conns_bound[x][0], conns_bound))),
 		"outbound_avg_latency": "%0.1f ms" % (lat_out_sum/sum(map(lambda x : conns_bound[x][1], conns_bound))),
 		"blockchain_wrong": bc_wrong,
+		"blockchain_len": len(REAL_BLOCKCHAIN),
 		"total_txs": TX_NUMBER,
-		"total_blocks": len(REAL_BLOCKCHAIN),
 		#"blockchain": blockchain,
 	})
 

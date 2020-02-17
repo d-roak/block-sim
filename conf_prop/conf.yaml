@@ -33,15 +33,15 @@ probJoin: 0.05
 probLookup: 0.0
 
 #plumtree
-fanout: 0.3
+fanout: 0.2
 
 # TODO change for high number of nodes
-tableSize: 15
+tableSize: 10
 sampleSize: 250
 # min number of neighbors
 neighbThreshold: 5
 
 probTxCreate: 0.5
-maxTxCreate: 10
+maxTxCreate: 1
 miners: 5
-minTxPerBlock: 500
+minTxPerBlock: 100
