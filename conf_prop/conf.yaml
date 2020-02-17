@@ -1,10 +1,10 @@
 # system settings, mandatory
 #bitcoin/ethereum less than 8000/10000
-nbNodes : 500
+nbNodes : 50
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100
 # duration of node cycle
-NODE_CYCLE: 1000
+NODE_CYCLE: 100
 # node cycle drift, zero means perfect clocks 
 NODE_DRIFT: 0
 # link latency, 
@@ -33,7 +33,7 @@ probJoin: 0.05
 probLookup: 0.0
 
 #plumtree
-fanout: 0.5
+fanout: 0.3
 
 # TODO change for high number of nodes
 tableSize: 15

@@ -4,7 +4,7 @@ nbNodes : 500
 # number of simulation cycles
 nbCycles : 1000
 # duration of node cycle
-NODE_CYCLE: 1000
+NODE_CYCLE: 100
 # node cycle drift, zero means perfect clocks 
 NODE_DRIFT: 0
 # link latency, 

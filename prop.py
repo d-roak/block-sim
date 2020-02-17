@@ -20,8 +20,8 @@ import utils
 PING_MSG, PONG_MSG, FINDNODE_MSG, NEIGHBORS_MSG, CONNECT_MSG, ACKCONNECT_MSG, REJECTCONNECT_MSG, FORCECONNECT_MSG, DISCONNECT_MSG = \
 "PING", "PONG", "FINDNODE", "NEIGHBORS", "CONNECT", "ACKCONNECT", "REJECTCONNECT", "FORCECONNECT", "DISCONNECT"
 
-STATUS_MSG, BLOCKHASHES_MSG, GETBLOCKS_MSG, BLOCK_MSG, TXS_MSG, PRUNE_MSG = \
-"STATUS", "BLOCKHASHES", "GETBLOCKS", "BLOCK", "TRANSACTIONS", "PRUNE"
+STATUS_MSG, BLOCKHASHES_MSG, GETBLOCKS_MSG, BLOCK_MSG, TXS_MSG, GRAFT_MSG, PRUNE_MSG = \
+"STATUS", "BLOCKHASHES", "GETBLOCKS", "BLOCK", "TRANSACTIONS", "GRAFT", "PRUNE"
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, NEIGHBS, \
 BTREE, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, QUEUED_TXS, QUEUED_BLOCKS, SENT_STATUS = \
@@ -41,15 +41,25 @@ def init():
 	for nodeId in nodeState:
 		sim.schedulleExecution(CYCLE, nodeId)
 
+def improve_performance(cycle):
+	if cycle % 100 != 0 or cycle == 0:
+		return
+
+	gc.collect()
+	if gc.garbage:
+		gc.garbage[0].set_next(None)
+		del gc.garbage[:]
+
 def CYCLE(self):
 	global nodeState, TX_NUMBER
 
 	if self not in nodeState:
 		return
-
+     
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
+		improve_performance(nodeState[self][CURRENT_CYCLE])
 
 	if self not in NETWORK_NODES:
 		# join the network
@@ -73,9 +83,7 @@ def CYCLE(self):
 		if neighbsSize(self) < neighbThreshold:
 			lookup(self)
 		
-		# TODO reduce messages while maintaining low latency
-		#if random.random() <= probLookup:
-		#	lookup(self)
+		improve(self)
 
 		# Message dissemination		
 		# Blockchain maintenance
@@ -141,6 +149,11 @@ def lookup(self):
 	for n in nodeState[self][NEIGHBS]:
 		sim.send(FINDNODE, n, self, FINDNODE_MSG)
 		nodeState[self][MEMB_MSGS_SENT] += 1
+
+def improve(self):
+	for n in nodeState[self][DB].copy():
+		addEntryNeighbs(self, n)
+
 
 '''
 Model
@@ -275,8 +288,6 @@ def BLOCK(self, source, msg, block):
 
 	if prune:	
 		pruneBTree(self, source)
-		sim.send(PRUNE, source, self, PRUNE_MSG)
-		nodeState[self][DISS_MSGS_SENT] += 1
 
 
 def TXS(self, source, msg, txs):
@@ -296,8 +307,6 @@ def TXS(self, source, msg, txs):
 
 	if prune:
 		pruneBTree(self, source)
-		sim.send(PRUNE, source, self, PRUNE_MSG)
-		nodeState[self][DISS_MSGS_SENT] += 1
 
 	if disseminate:
 		dissList = list(nodeState[self][BTREE][EAGER])
@@ -308,16 +317,25 @@ def TXS(self, source, msg, txs):
 			nodeState[self][DISS_MSGS_SENT] += 1
 
 
+def GRAFT(self, source, msg):
+	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
+	nodeState[self][DISS_MSGS_RECEIVED] += 1
+
+	addEntryDB(self, source)
+	graftBTree(self, source)
+
 def PRUNE(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
+	addEntryDB(self, source)
 	pruneBTree(self, source)
 
 
 # Node functions
 def createNode(id):
 	# CURRENT_CYCLE			# simulator
+	# CURRENT_TIME			# simulator
 	# MEMB_MSGS_RECEIVED	# stats
 	# MEMB_MSGS_SENT		# stats
 	# DISS_MSGS_RECEIVED	# stats
@@ -335,7 +353,7 @@ def createNode(id):
 	# QUEUED_BLOCKS			# private
 	# SENT_STATUS			# private
 
-	return [0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), ([], []), [], dict(), dict(), dict(), [], [], []]
+	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), ([], []), [], dict(), dict(), dict(), [], [], []]
 
 
 # DB (not persistent)
@@ -361,12 +379,12 @@ def neighbsSize(self):
 def addEntryNeighbs(self, node):
 	# [node] (failedResponses)
 	if hasEntryNeighbs(self, node) or self == node:
-		return
+		return False
 	
 	if neighbsSize(self) < tableSize:
 		nodeState[self][NEIGHBS][node] = 0
-		updateBTree(self, add = True)
-		return
+		graftBTree(self, node)
+		return True
 
 	worst = node
 	for n in nodeState[self][NEIGHBS]:
@@ -377,6 +395,8 @@ def addEntryNeighbs(self, node):
 
 	if worst != node:
 		replaceEntryNeighbs(self, node, worst)
+		return True
+	return False
 
 def hasEntryNeighbs(self, node):
 	if node in nodeState[self][NEIGHBS]:
@@ -395,7 +415,7 @@ def replaceEntryNeighbs(self, node, rmnode):
 	addEntryDB(self, rmnode)
 	removeEntryNeighbs(self, rmnode)
 	nodeState[self][NEIGHBS][node] = 0
-	updateBTree(self, add = True, remove = True)
+	graftBTree(self, node)
 
 def lifeCheckDBNeighbs(self):
 	# if the last pong received is older than 1 day (24h = 86400s), that node will be removed from the db
@@ -409,43 +429,35 @@ def lifeCheckDBNeighbs(self):
 		# give one as margin because pendent response
 		if lookupEntryNeighbs(self, n) and nodeState[self][NEIGHBS][n] > 4:
 			removeEntryNeighbs(self, n)
-			updateBTree(self, remove = True)
 
 # Helpers
 
-def updateBTree(self, add = False, remove = False):
-	if add:
-		for n in nodeState[self][NEIGHBS]:
-			if n not in nodeState[self][BTREE][LAZY] and n not in nodeState[self][BTREE][EAGER]:
-				nodeState[self][BTREE][LAZY].append(n)
-	if remove:
-		for n in nodeState[self][BTREE][LAZY]:
-			if n not in nodeState[self][NEIGHBS]:
-				nodeState[self][BTREE][LAZY].remove(n)
-		for n in nodeState[self][BTREE][EAGER]:
-			if n not in nodeState[self][NEIGHBS]:
-				nodeState[self][BTREE][EAGER].remove(n)
-
-	while len(nodeState[self][BTREE][EAGER]) < tableSize*fanout:
-		if len(nodeState[self][NEIGHBS]) < tableSize*fanout:
+def updateBTree(self):
+	tmp = set(list(nodeState[self][NEIGHBS].keys()) + nodeState[self][BTREE][LAZY])
+	choices = random.choices(list(tmp), k=min(len(tmp), int(tableSize*fanout)))
+	for c in choices:
+		if len(nodeState[self][BTREE][EAGER]) >= tableSize*fanout:
 			break
-		choice = random.choice(nodeState[self][BTREE][LAZY])
-		graftBTree(self, choice)
+		if c not in nodeState[self][BTREE][EAGER]:
+			graftBTree(self, c)
 
 
 def graftBTree(self, grafted):
-	if grafted in nodeState[self][NEIGHBS]:
-		if grafted in nodeState[self][BTREE][LAZY]: 
-			nodeState[self][BTREE][LAZY].remove(grafted)
-		if grafted not in nodeState[self][BTREE][EAGER]:
-			nodeState[self][BTREE][EAGER].append(grafted)
+	if grafted in nodeState[self][BTREE][LAZY]: 
+		nodeState[self][BTREE][LAZY].remove(grafted)
+	if grafted not in nodeState[self][BTREE][EAGER]:
+		nodeState[self][BTREE][EAGER].append(grafted)
+		sim.send(GRAFT, grafted, self, GRAFT_MSG)
+		nodeState[self][DISS_MSGS_SENT] += 1
+
 
 def pruneBTree(self, pruned):
-	if pruned in nodeState[self][NEIGHBS]:
-		if pruned in nodeState[self][BTREE][EAGER]:
-			nodeState[self][BTREE][EAGER].remove(pruned)
-		if pruned not in nodeState[self][BTREE][LAZY]:
-			nodeState[self][BTREE][LAZY].append(pruned)
+	if pruned in nodeState[self][BTREE][EAGER]:
+		nodeState[self][BTREE][EAGER].remove(pruned)
+		sim.send(PRUNE, pruned, self, PRUNE_MSG)
+		nodeState[self][DISS_MSGS_SENT] += 1
+	if pruned not in nodeState[self][BTREE][LAZY]:
+		nodeState[self][BTREE][LAZY].append(pruned)
 	updateBTree(self)
 
 def lookupNeighbors(self):
@@ -473,7 +485,7 @@ def probeLatency(self, dest):
 # Blockchain functions
 
 def generateGenesisBlock():
-	header = ("0", "0", 1231006505)
+	header = ("0", "0", 0)
 	body = ("0", [])
 	block = Block(0, header, body)
 	return block
@@ -638,7 +650,7 @@ def wrapup(dir):
 	data['nodes'] = []
 	for n in nodeState:
 		#db = []
-		#neighbs = {}
+		neighbs = {}
 		blockchain_local = []
 		lat_sum = 0
 		
@@ -662,7 +674,7 @@ def wrapup(dir):
 		#for i in nodeState[n][DB]:
 		#	db.append(i)
 		for i in nodeState[n][NEIGHBS]:
-			#neighbs[i] = str(sim.getMessageLatency(n, i)) + "ms"
+			neighbs[i] = str(sim.getMessageLatency(n, i)) + "ms"
 			lat_sum += sim.getMessageLatency(n, i)
 			lat_out_sum += sim.getMessageLatency(n, i)
 			lat_in_sum += sim.getMessageLatency(i, n)
@@ -686,10 +698,12 @@ def wrapup(dir):
 			"peer_avg_latency": "%0.1f ms" % (avg_latency),
 			"blockchain_right": bc_right,
 			#"blockchain_local": blockchain_local,
-			"known_blocks": list(nodeState[n][KNOWN_BLOCKS].keys()),
+			#"known_blocks": list(nodeState[n][KNOWN_BLOCKS].keys()),
 			#"known_txs": list(nodeState[n][KNOWN_TXS].keys()),
 			#"db": db,
-			#"neighbs": neighbs
+			"neighbs": neighbs,
+			"eager_view": nodeState[n][BTREE][EAGER],
+			"lazy_view": nodeState[n][BTREE][LAZY]
 		})
 
 	for n in conns_bound:
@@ -793,7 +807,7 @@ if __name__ == '__main__':
 	fl.setFormatter(formatter)
 
 	#logger.addHandler(fl)
-
+	gc.enable()
 	confFile = sys.argv[1] + '/conf.yaml'
 	f = open(confFile)
 

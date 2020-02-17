@@ -554,7 +554,7 @@ def kadDistance(n1, n2):
 # Blockchain functions
 
 def generateGenesisBlock():
-	header = ("0", "0", 1231006505)
+	header = ("0", "0", 0)
 	body = ("0", [])
 	block = Block(0, header, body)
 	return block
