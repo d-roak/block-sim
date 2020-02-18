@@ -13,6 +13,7 @@ import math
 import merkletools
 import statistics
 import hashlib
+import time
 
 from sim import sim
 import utils
@@ -34,7 +35,8 @@ EAGER, LAZY = 0, 1
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
 TX_NUMBER = 0
-BLOCK_NUMBER = 0
+BLOCK_NUMBER = 1
+LAST_CYCLE_TIME = 999999999999
 
 def init():
 	global nodeState
@@ -43,9 +45,18 @@ def init():
 		sim.schedulleExecution(CYCLE, nodeId)
 
 def improve_performance(cycle):
-	if cycle % 100 != 0 or cycle == 0:
-		return
+	global LAST_CYCLE_TIME
 
+	if time.time() - LAST_CYCLE_TIME > 2:
+		LAST_CYCLE_TIME = time.time()
+	else:
+		LAST_CYCLE_TIME = time.time()
+		return
+	#if cycle % 100 != 0 or cycle == 0:
+	#	return
+
+	# remove half the messages
+	sim.queue = sim.queue[int(len(sim.queue)/2):]
 	gc.collect()
 	if gc.garbage:
 		gc.garbage[0].set_next(None)
@@ -60,7 +71,8 @@ def CYCLE(self):
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
-		improve_performance(nodeState[self][CURRENT_CYCLE])
+		#improve_performance(nodeState[self][CURRENT_CYCLE])
+		print("Events: ", sim.getNumberEvents())
 
 	if self not in NETWORK_NODES:
 		# join the network
@@ -74,6 +86,9 @@ def CYCLE(self):
 				addEntryNeighbs(self, n)
 				sim.send(FINDNODE, n, self, FINDNODE_MSG)
 		'''
+		if len(nodeState[self][NEIGHBS]) == 0:
+			join(self)
+
 		# lifecheck and cycle ping
 		lifeCheckDBNeighbs(self)
 		for n in nodeState[self][DB]:
@@ -136,7 +151,8 @@ def CYCLE(self):
 		sim.schedulleExecution(CYCLE, self)
 
 def join(self):
-	NETWORK_NODES.append(self)
+	if self not in NETWORK_NODES:
+		NETWORK_NODES.append(self)
 	if len(NETWORK_NODES) < 2:
 		return
 	destNode = random.choice(NETWORK_NODES)
@@ -568,6 +584,12 @@ class Block:
 		self.nonce = random.random() * 10000000
 		self.header = header
 		self.body = body
+		#sha256(prev_hash, merkle_root, timestamp)
+		h = hashlib.sha256()
+		h.update(self.header[0].encode('utf-8'))
+		h.update(self.header[1].encode('utf-8'))
+		h.update(str(self.header[2]).encode('utf-8'))
+		self.hash = h.hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -587,12 +609,7 @@ class Block:
 		return self.header
 
 	def getHash(self):
-		#sha256(prev_hash, merkle_root, timestamp)
-		h = hashlib.sha256()
-		h.update(self.header[0].encode('utf-8'))
-		h.update(self.header[1].encode('utf-8'))
-		h.update(str(self.header[2]).encode('utf-8'))
-		return h.hexdigest()
+		return self.hash
 
 	def getBody(self):
 		return self.body
@@ -603,6 +620,7 @@ class Tx:
 	def __init__(self, n):
 		self.nonce = random.random() * 10000000
 		self.n = n
+		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -616,7 +634,7 @@ class Tx:
 			return 1
 	
 	def getHash(self):
-		return hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
+		return self.hash
 
 
 def wrapup(dir):
@@ -633,8 +651,8 @@ def wrapup(dir):
 	membMsgsSent = list(map(lambda x: nodeState[x][MEMB_MSGS_SENT], nodeState))
 	dissMsgsReceived = list(map(lambda x: nodeState[x][DISS_MSGS_RECEIVED], nodeState))
 	dissMsgsSent = list(map(lambda x: nodeState[x][DISS_MSGS_SENT], nodeState))
-	totalMsgsReceived = list(membMsgsReceived) + list(dissMsgsReceived)
-	totalMsgsSent = list(membMsgsSent) + list(dissMsgsSent)
+	totalMsgsReceived = list(map(lambda x: nodeState[x][MEMB_MSGS_RECEIVED] + nodeState[x][DISS_MSGS_RECEIVED], nodeState))
+	totalMsgsSent =  list(map(lambda x: nodeState[x][MEMB_MSGS_SENT] + nodeState[x][DISS_MSGS_SENT], nodeState))
 	data['stats'] = {}
 	data['stats'].update({
 		"numCycles": nbCycles,
@@ -665,7 +683,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b not in nodeState[n][BLOCKCHAIN]:
+			if b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -789,6 +807,7 @@ def configure(config):
 		nodeState[n] = createNode(n)
 		nodeState[n][BLOCKCHAIN].append(genesisBlock)
 		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock.getHash()] = genesisBlock
+		nodeState[n][KNOWN_BLOCKS][genesisBlock.getHash()] = genesisBlock
 
 	sim.init(nodeCycle, nodeDrift, latencyTable, 0)
 

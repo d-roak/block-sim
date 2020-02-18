@@ -12,6 +12,7 @@ import json
 import math
 import statistics
 import merkletools
+import time
 
 from sim import sim
 import utils
@@ -31,6 +32,8 @@ BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, ANN_TXS, SENT_STATUS = 0, 1, 2, 3, 4
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
 TX_NUMBER = 0
+BLOCK_NUMBER = 1
+LAST_CYCLE_TIME = 999999999999
 
 #used for recursive lookup
 neighborsQueue = {}
@@ -45,12 +48,30 @@ def init():
 
 		sim.schedulleExecution(CYCLE, nodeId)
 
+def improve_performance(cycle):
+	global LAST_CYCLE_TIME
+
+	if time.time() - LAST_CYCLE_TIME > 2:
+		LAST_CYCLE_TIME = time.time()
+	else:
+		LAST_CYCLE_TIME = time.time()
+		return
+
+	# remove half the messages
+	sim.queue = sim.queue[int(len(sim.queue)/2):]
+
+	gc.collect()
+	if gc.garbage:
+		gc.garbage[0].set_next(None)
+		del gc.garbage[:]
+
 def CYCLE(self):
-	global nodeState, TX_NUMBER
+	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
+		#improve_performance(nodeState[self][CURRENT_CYCLE])
 
 	if self not in nodeState:
 		return
@@ -117,6 +138,7 @@ def CYCLE(self):
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
 			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
 				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
+				BLOCK_NUMBER += 1
 				nodeState[self][KNOWN_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 
@@ -355,13 +377,31 @@ def NEWBLOCK(self, source, msg, block):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
-	nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
+	if block.getHash() in nodeState[self][KNOWN_BLOCKS]:
+		propagate = False
+	else:
+		propagate = True
+		nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
+
+	#propagation
+	if propagate:
+		neighbors = getNeighbors(self)
+		if source in neighbors:
+			neighbors.remove(source)
+		rootSample = random.sample(neighbors, int(math.sqrt(len(neighbors))))
+		for n in neighbors:
+			if n in rootSample:
+				sim.send(NEWBLOCK, n, self, NEWBLOCK_MSG, block)
+			else:
+				sim.send(NEWBLOCKHASHES, n, self, NEWBLOCKHASHES_MSG, [block.getHash()])
+			nodeState[self][DISS_MSGS_SENT] += 1
 
 
 # Node functions
 
 def createNode(id):
 	# CURRENT_CYCLE			# simulator
+	# CURRENT_TIME			# simulator
 	# MEMB_MSGS_RECEIVED	# stats
 	# MEMB_MSGS_SENT		# stats
 	# DISS_MSGS_RECEIVED	# stats
@@ -377,7 +417,7 @@ def createNode(id):
 	# ANN_TXS				# private
 	# SENT_STATUS			# private
 
-	return [0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), [], dict(), dict(), dict(), dict(), []]
+	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), [], dict(), dict(), dict(), dict(), []]
 
 
 # DB (not persistent)
@@ -509,7 +549,7 @@ def lookup(self, target, stopMatch):
 			if pendingQueries >= alpha:
 				break
 			if n not in asked.keys():
-				asked[n] = nodeState[self][CURRENT_TIME]
+				asked[n] = time.time()
 				pendingQueries += 1
 				addEntryDb(self, n)
 				addEntryBucket(self, n)
@@ -537,7 +577,7 @@ def lookup(self, target, stopMatch):
 			if asked[n] == 0:
 				continue
 
-			t = (nodeState[self][CURRENT_TIME] - asked[n]) * 1000
+			t = (time.time() - asked[n]) * 1000
 			if t > lookupTimeout:
 				pendingQueries = 0
 
@@ -630,6 +670,12 @@ class Block:
 		self.nonce = random.random() * 10000000
 		self.header = header
 		self.body = body
+		#sha256(prev_hash, merkle_root, timestamp)
+		h = hashlib.sha256()
+		h.update(self.header[0].encode('utf-8'))
+		h.update(self.header[1].encode('utf-8'))
+		h.update(str(self.header[2]).encode('utf-8'))
+		self.hash = h.hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -649,12 +695,7 @@ class Block:
 		return self.header
 
 	def getHash(self):
-		#sha256(prev_hash, merkle_root, timestamp)
-		h = hashlib.sha256()
-		h.update(self.header[0].encode('utf-8'))
-		h.update(self.header[1].encode('utf-8'))
-		h.update(str(self.header[2]).encode('utf-8'))
-		return h.hexdigest()
+		return self.hash
 
 	def getBody(self):
 		return self.body
@@ -665,6 +706,7 @@ class Tx:
 	def __init__(self, n):
 		self.nonce = random.random() * 10000000
 		self.n = n
+		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -678,7 +720,7 @@ class Tx:
 			return 1
 	
 	def getHash(self):
-		return hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
+		return self.hash
 
 
 # Simulator and logging functions
@@ -697,8 +739,8 @@ def wrapup(dir):
 	membMsgsSent = list(map(lambda x: nodeState[x][MEMB_MSGS_SENT], nodeState))
 	dissMsgsReceived = list(map(lambda x: nodeState[x][DISS_MSGS_RECEIVED], nodeState))
 	dissMsgsSent = list(map(lambda x: nodeState[x][DISS_MSGS_SENT], nodeState))
-	totalMsgsReceived = list(membMsgsReceived) + list(dissMsgsReceived)
-	totalMsgsSent = list(membMsgsSent) + list(dissMsgsSent)
+	totalMsgsReceived = list(map(lambda x: nodeState[x][MEMB_MSGS_RECEIVED] + nodeState[x][DISS_MSGS_RECEIVED], nodeState))
+	totalMsgsSent =  list(map(lambda x: nodeState[x][MEMB_MSGS_SENT] + nodeState[x][DISS_MSGS_SENT], nodeState))
 	data['stats'] = {}
 	data['stats'].update({
 		"numCycles": nbCycles,
@@ -730,7 +772,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b not in nodeState[n][BLOCKCHAIN]:
+			if b.getHash() not in nodeState[n][BLOCKCHAIN_HASHES] and b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -768,6 +810,8 @@ def wrapup(dir):
 			"diss_msgs_sent": nodeState[n][DISS_MSGS_SENT],
 			"peer_avg_latency": "%0.1f ms" % (avg_latency),
 			"blockchain_right": bc_right,
+			"blockchain_len": len(nodeState[n][BLOCKCHAIN]),
+			"known_blocks_len": len(nodeState[n][KNOWN_BLOCKS]),
 			#"blockchain_local": blockchain_local,
 			#"db": db,
 			#"table": table
@@ -799,6 +843,7 @@ def wrapup(dir):
 		"outbound_avg_latency": "%0.1f ms" % (lat_out_sum/sum(map(lambda x : conns_bound[x][1], conns_bound))),
 		"blockchain_wrong": bc_wrong,
 		"blockchain_len": len(REAL_BLOCKCHAIN),
+		"total_blocks": BLOCK_NUMBER,
 		"total_txs": TX_NUMBER,
 		#"blockchain": blockchain,
 	})

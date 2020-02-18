@@ -12,6 +12,7 @@ import math
 import hashlib
 import merkletools
 import statistics
+import time
 
 from sim import sim
 import utils
@@ -31,7 +32,8 @@ MSG_TX, MSG_BLOCK = 0, 1
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
 TX_NUMBER = 0
-
+BLOCK_NUMBER = 1
+LAST_CYCLE_TIME = 999999999999
 
 def init():
 	global nodeState
@@ -39,12 +41,31 @@ def init():
 	for nodeId in nodeState:
 		sim.schedulleExecution(CYCLE, nodeId)
 
+def improve_performance(cycle):
+	global LAST_CYCLE_TIME
+
+	if time.time() - LAST_CYCLE_TIME > 2:
+		LAST_CYCLE_TIME = time.time()
+	else:
+		LAST_CYCLE_TIME = time.time()
+		return
+	#if cycle % 100 != 0 or cycle == 0:
+	#	return
+
+	# remove half the messages
+	del sim.queue[:int(len(sim.queue)/2)]
+	gc.collect()
+	if gc.garbage:
+		gc.garbage[0].set_next(None)
+		del gc.garbage[:]
+
 def CYCLE(self):
-	global nodeState, TX_NUMBER
+	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
+		#improve_performance(nodeState[self][CURRENT_CYCLE])
 
 	if self not in nodeState:
 		return
@@ -54,17 +75,18 @@ def CYCLE(self):
 		if random.random() <= probJoin:
 			join(self)
 	else:
+		# lookup for new neighbors
+		if connsCount(self) == 0:
+			join(self)
+			print("join")
+		elif connsCount(self) <= p or nodeState[self][CURRENT_CYCLE] % 10 == 0:
+			lookup(self)
+
 		# lifecheck and cycle ping
 		lifeCheckDBNeighbs(self)
 		for n in nodeState[self][CONNS]:
 			sim.send(PING, n, self, PING_MSG)
 			nodeState[self][MEMB_MSGS_SENT] += 1
-		
-		# lookup for new neighbors
-		if connsCount(self) == 0:
-			join(self)
-		elif connsCount(self) <= p or nodeState[self][CURRENT_CYCLE] % 10 == 0:
-			lookup(self)
 
 		# Message dissemination
 		# Started for 1st time simulation
@@ -114,6 +136,7 @@ def CYCLE(self):
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
 			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
 				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
+				BLOCK_NUMBER += 1
 				nodeState[self][KNOWN_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 				for n in random.sample(nodeState[self][CONNS].keys(), int(connsCount(self)*floodPercentage)):
@@ -464,6 +487,12 @@ class Block:
 		self.nonce = random.random() * 10000000
 		self.header = header
 		self.body = body
+		#sha256(prev_hash, merkle_root, timestamp)
+		h = hashlib.sha256()
+		h.update(self.header[0].encode('utf-8'))
+		h.update(self.header[1].encode('utf-8'))
+		h.update(str(self.header[2]).encode('utf-8'))
+		self.hash = h.hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -480,12 +509,7 @@ class Block:
 		return self.header
 
 	def getHash(self):
-		#sha256(prev_hash, merkle_root, timestamp)
-		h = hashlib.sha256()
-		h.update(self.header[0].encode('utf-8'))
-		h.update(self.header[1].encode('utf-8'))
-		h.update(str(self.header[2]).encode('utf-8'))
-		return h.hexdigest()
+		return self.hash
 
 	def getBody(self):
 		return self.body
@@ -496,6 +520,7 @@ class Tx:
 	def __init__(self, n):
 		self.nonce = random.random() * 10000000
 		self.n = n
+		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
 
 	def __str__(self):
 		return self.getHash()
@@ -509,7 +534,7 @@ class Tx:
 			return 1
 	
 	def getHash(self):
-		return hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
+		return self.hash
 
 
 # Inventory definition
@@ -552,8 +577,8 @@ def wrapup(dir):
 	membMsgsSent = list(map(lambda x: nodeState[x][MEMB_MSGS_SENT], nodeState))
 	dissMsgsReceived = list(map(lambda x: nodeState[x][DISS_MSGS_RECEIVED], nodeState))
 	dissMsgsSent = list(map(lambda x: nodeState[x][DISS_MSGS_SENT], nodeState))
-	totalMsgsReceived = list(membMsgsReceived) + list(dissMsgsReceived)
-	totalMsgsSent = list(membMsgsSent) + list(dissMsgsSent)
+	totalMsgsReceived = list(map(lambda x: nodeState[x][MEMB_MSGS_RECEIVED] + nodeState[x][DISS_MSGS_RECEIVED], nodeState))
+	totalMsgsSent =  list(map(lambda x: nodeState[x][MEMB_MSGS_SENT] + nodeState[x][DISS_MSGS_SENT], nodeState))
 	data['stats'] = {}
 	data['stats'].update({
 		"numCycles": nbCycles,
@@ -584,7 +609,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b not in nodeState[n][BLOCKCHAIN]:
+			if b.getHash() not in nodeState[n][BLOCKCHAIN_HASHES] and b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -614,6 +639,8 @@ def wrapup(dir):
 			"diss_msgs_sent": nodeState[n][DISS_MSGS_SENT],
 			"peer_avg_latency": "%0.1f ms" % (avg_latency),
 			"blockchain_right": bc_right,
+			"blockchain_len": len(nodeState[n][BLOCKCHAIN]),
+			"known_blocks_len": len(nodeState[n][KNOWN_BLOCKS]),
 			#"blockchain_local": blockchain_local,
 			#"known_blocks": known_blocks,
 			#"known_txs": known_txs,
@@ -646,6 +673,7 @@ def wrapup(dir):
 		"outbound_avg_latency": "%0.1f ms" % (lat_out_sum/sum(map(lambda x : conns_bound[x][1], conns_bound))),
 		"blockchain_wrong": bc_wrong,
 		"blockchain_len": len(REAL_BLOCKCHAIN),
+		"total_blocks": BLOCK_NUMBER,
 		"total_txs": TX_NUMBER,
 		#"blockchain": blockchain,
 	})

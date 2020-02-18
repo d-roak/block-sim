@@ -1,8 +1,8 @@
 # system settings, mandatory
 #bitcoin/ethereum less than 8000/10000
-nbNodes : 500
+nbNodes : 20
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100
 # duration of node cycle
 NODE_CYCLE: 100
 # node cycle drift, zero means perfect clocks 
@@ -28,7 +28,7 @@ CHURN : False
 # dont use seed
 randomSeed: -1
 #randomSeed: 123456789
-probJoin: 0.05
+probJoin: 0.1
 probLookup: 1
 
 # protocol specific
@@ -38,11 +38,12 @@ bucketsNumber: 256
 # recursive lookup
 alpha: 3
 # default lookuptimeout 1000
-lookupTimeout: 100
+# uses time.time() instead CURRENT_TIME
+lookupTimeout: 1000
 
 floodPercentage: 1
 maxBlockHeaders: 100
 probTxCreate: 0.5
 maxTxCreate: 1
 miners: 5
-minTxPerBlock: 100
+minTxPerBlock: 200
