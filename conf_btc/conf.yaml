@@ -1,7 +1,7 @@
 # system settings, mandatory
-nbNodes : 500
+nbNodes : 50
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100
 # duration of node cycle
 NODE_CYCLE: 100
 # node cycle drift, zero means perfect clocks 
@@ -27,7 +27,7 @@ CHURN : False
 # dont use seed
 randomSeed: -1
 #randomSeed: 123456789
-probJoin: 0.05
+probJoin: 0.1
 
 # protocol specific
 # minimum number of open connections
@@ -36,8 +36,10 @@ sampleSize: 2500
 
 # Improvement to bitcoin, with a flood to 50% of the nodes, it can mantain the correctness
 # of the blockchain
-floodPercentage: 1
-probTxCreate: 0.5
+probTxCreate: 1
 maxTxCreate: 1
 miners: 5
-minTxPerBlock: 100
+# 1 block every 10 min
+# 10 min = 10 * 60 * 10 * 100 = 600 000 cycles
+# minTxPerBlock = 600 000 / nbNodes
+minTxPerBlock: 12

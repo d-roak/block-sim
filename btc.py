@@ -23,6 +23,9 @@ INV_MSG, GETHEADERS_MSG, HEADERS_MSG, GETBLOCKS_MSG, GETDATA_MSG, BLOCK_MSG, TX_
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, CONNS, \
 BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11
 
+# Conns
+LAST_PONG, QUEUED_INVS = 0, 1
+
 # Inventory types
 MSG_TX, MSG_BLOCK = 0, 1
 
@@ -30,6 +33,7 @@ MSG_TX, MSG_BLOCK = 0, 1
 # nodes don't have an overview of the network
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
+REPEATED_BLOCK_COUNT = []
 TX_NUMBER = 0
 
 
@@ -37,6 +41,7 @@ def init():
 	global nodeState
 
 	for nodeId in nodeState:
+		REPEATED_BLOCK_COUNT.append({})
 		sim.schedulleExecution(CYCLE, nodeId)
 
 def CYCLE(self):
@@ -45,6 +50,7 @@ def CYCLE(self):
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
+		print("Events: ", sim.getNumberEvents())
 
 	if self not in nodeState:
 		return
@@ -54,71 +60,56 @@ def CYCLE(self):
 		if random.random() <= probJoin:
 			join(self)
 	else:
+		# lookup for new neighbors
+		if connsCount(self) == 0:
+			join(self)
+		elif connsCount(self) <= p:
+			lookup(self)
+
 		# lifecheck and cycle ping
 		lifeCheckDBNeighbs(self)
 		for n in nodeState[self][CONNS]:
 			sim.send(PING, n, self, PING_MSG)
-			nodeState[self][MEMB_MSGS_SENT] += 1
-		
-		# lookup for new neighbors
-		if connsCount(self) == 0:
-			join(self)
-		elif connsCount(self) <= p or nodeState[self][CURRENT_CYCLE] % 10 == 0:
-			lookup(self)
+			#nodeState[self][MEMB_MSGS_SENT] += 1
 
-		# Message dissemination
-		# Started for 1st time simulation
-		if len(nodeState[self][BLOCKCHAIN]) == 1:
-			for n in nodeState[self][CONNS]:
-				sim.send(GETHEADERS, n, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0].getHash(), 0)
-				nodeState[self][MEMB_MSGS_SENT] += 1
+			# Announcement
+			inv = nodeState[self][CONNS][n][QUEUED_INVS]
+			if len(inv) > 0:
+				sim.send(INV, n, self, INV_MSG, inv)
+				nodeState[self][DISS_MSGS_SENT] += 1
 
-		# Blockchain maintenance
+		# Proccess known blocks
+		for _, b in nodeState[self][KNOWN_BLOCKS].copy().items():
+			# Remove known txs that are already in blocks
+			txs = list(b.getBody()[1])
+			for t in txs:
+				if t.getHash() in nodeState[self][KNOWN_TXS]:
+					del nodeState[self][KNOWN_TXS][t.getHash()]
+
+			# Add to blockchain
+			if b.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
+				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], b):
+					nodeState[self][BLOCKCHAIN_HASHES][b.getHash()] = b
+				addBlockToBlockchain(REAL_BLOCKCHAIN, b)
+
 		# Create transactions
-		if random.random() <= probTxCreate:
+		# Stop creating txs if there are lots of events
+		if sim.getNumberEvents() < 5000 and random.random() <= probTxCreate:
 			for _ in range(0, 1+int(random.random()*maxTxCreate)):
 				t = generateTx(TX_NUMBER)
 				TX_NUMBER += 1
 				nodeState[self][KNOWN_TXS][t.getHash()] = t
-
-		# Announcement
-		inv = []
-		for _, b in nodeState[self][KNOWN_BLOCKS].items():
-			inv.append(Inventory(MSG_BLOCK, b.getHash()))
-		for _, t in nodeState[self][KNOWN_TXS].items():
-			inv.append(Inventory(MSG_TX, t.getHash()))
-
-		if inv:
-			for n in random.sample(nodeState[self][CONNS].keys(), int(len(nodeState[self][CONNS].keys())*floodPercentage)):
-				sim.send(INV, n, self, INV_MSG, inv)
-				nodeState[self][DISS_MSGS_SENT] += 1
-
-			# Proccess known blocks
-			for _, b in nodeState[self][KNOWN_BLOCKS].copy().items():
-				# Remove known txs that are already in blocks
-				txs = list(b.getBody()[1])
-				for t in txs:
-					if t.getHash() in nodeState[self][KNOWN_TXS]:
-						del nodeState[self][KNOWN_TXS][t.getHash()]
-
-				# Add to blockchain
-				if b.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
-					if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], b):
-						nodeState[self][BLOCKCHAIN_HASHES][b.getHash()] = b
-					addBlockToBlockchain(REAL_BLOCKCHAIN, b)
-
-				del nodeState[self][KNOWN_BLOCKS][b.getHash()]
+				addInvConns(self, Inventory(MSG_TX, t.getHash()))
 
 		# Create block
 		# Stop creating blocks at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
 			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
 				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
+				REPEATED_BLOCK_COUNT[self].update({b.getHash():0})
 				nodeState[self][KNOWN_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
-				for n in random.sample(nodeState[self][CONNS].keys(), int(connsCount(self)*floodPercentage)):
-					sim.send(BLOCK, n, self, BLOCK_MSG, b)
-					nodeState[self][DISS_MSGS_SENT] += 1
+				addInvConns(self, Inventory(MSG_BLOCK, b.getHash()))
 
 	nodeState[self][CURRENT_CYCLE] += 1
 	nodeState[self][CURRENT_TIME] += nodeCycle
@@ -140,7 +131,9 @@ def join(self):
 	addConn(self, destNode)
 	sim.send(VERSION, destNode, self, VERSION_MSG)
 	sim.send(GETADDR, destNode, self, GETADDR_MSG)
+	sim.send(GETHEADERS, destNode, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0].getHash(), 0)
 	nodeState[self][MEMB_MSGS_SENT] += 2
+	nodeState[self][DISS_MSGS_SENT] += 1
 
 def lookup(self):
 	for n in list(nodeState[self][CONNS].keys()):
@@ -237,10 +230,10 @@ def INV(self, source, msg, inv):
 			if i.getHash() not in nodeState[self][KNOWN_TXS]:
 				tmp.append(i)
 		elif i.getType() == MSG_BLOCK:
-			if i.getHash() not in nodeState[self][BLOCKCHAIN_HASHES] or i.getHash() not in nodeState[self][KNOWN_BLOCKS]:
+			if i.getHash() not in nodeState[self][KNOWN_BLOCKS]:
 				tmp.append(i)
 	
-	if not tmp:
+	if len(tmp) == 0:
 		return
 	sim.send(GETDATA, source, self, GETDATA_MSG, tmp)
 	nodeState[self][DISS_MSGS_SENT] += 1
@@ -326,9 +319,17 @@ def BLOCK(self, source, msg, block):
 	# Many mining pools do the same thing, although some may be misconfigured to send the block from multiple nodes, possibly sending the same block to some peers more than once.
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
+	
+	if block.getHash() not in REPEATED_BLOCK_COUNT[self]:
+		REPEATED_BLOCK_COUNT[self].update({block.getHash():1})
+	else:
+		REPEATED_BLOCK_COUNT[self][block.getHash()] += 1
 
 	if verifyBlocks(self, block):
-		nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
+		if block.getHash() not in nodeState[self][KNOWN_BLOCKS]:
+			nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
+			addInvConns(self, Inventory(MSG_BLOCK, block.getHash()))
+		rmInvConn(self, source, MSG_BLOCK, block.getHash())
 
 
 def TX(self, source, msg, tx):
@@ -339,7 +340,10 @@ def TX(self, source, msg, tx):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	if verifyTxs(self, tx):
-		nodeState[self][KNOWN_TXS][tx.getHash()] = tx
+		if tx.getHash() not in nodeState[self][KNOWN_TXS]:
+			nodeState[self][KNOWN_TXS][tx.getHash()] = tx
+			addInvConns(self, Inventory(MSG_TX, tx.getHash()))
+		rmInvConn(self, source, MSG_TX, tx.getHash())
 
 
 # Node functions
@@ -357,7 +361,7 @@ def createNode(id):
 	# BLOCKCHAIN_HASHES		# private
 	# KNOWN_TXS				# private
 	# KNOWN_BLOCKS			# private
-	
+
 	node = [0, 0, 0, 0, 0, 0, id, dict(), [], dict(), dict(), dict()]
 
 	return node
@@ -369,13 +373,24 @@ def createNode(id):
 def addConn(self, node):
 	if self == node:
 		return
-	nodeState[self][CONNS][node] = nodeState[self][CURRENT_TIME]
+	nodeState[self][CONNS][node] = [nodeState[self][CURRENT_TIME], []]
 
 def connsCount(self):
 	return len(nodeState[self][CONNS])
 
+def addInvConns(self, inv):
+	for n in nodeState[self][CONNS]:
+		nodeState[self][CONNS][n][QUEUED_INVS].append(inv)
+
+def rmInvConn(self, node, type, hash):
+	if node not in nodeState[self][CONNS]:
+		return
+	for i in nodeState[self][CONNS][node][QUEUED_INVS]:
+		if type == i.getType() and hash == i.getHash():
+			nodeState[self][CONNS][node][QUEUED_INVS].remove(i)
+
 def updateEntryPong(self, node, time):
-	nodeState[self][CONNS][node] = time
+	nodeState[self][CONNS][node][LAST_PONG] = time
 
 def createSample(self):
 	temp = list(nodeState[self][CONNS].keys())
@@ -391,7 +406,7 @@ def createSample(self):
 def lifeCheckDBNeighbs(self):
 	# Cycles of 1sec 60*90 = 90min
 	for n in nodeState[self][CONNS]:
-		if nodeState[self][CURRENT_TIME] - nodeState[self][CONNS][n] > 60 * 90:
+		if nodeState[self][CURRENT_TIME] - nodeState[self][CONNS][n][LAST_PONG] > 60 * 90:
 			del nodeState[self][CONNS][n]
 
 # Blockchain methods
@@ -588,6 +603,12 @@ def wrapup(dir):
 				bc_right = False
 				bc_wrong += 1
 				break
+		bc_right = True
+		for b in REAL_BLOCKCHAIN:
+			if b not in nodeState[n][BLOCKCHAIN]:
+				bc_right = False
+				bc_wrong += 1
+				break
 
 		#for _, b in nodeState[n][KNOWN_BLOCKS].items():
 		#	known_blocks.append(b.getHash())
@@ -650,10 +671,11 @@ def wrapup(dir):
 		#"blockchain": blockchain,
 	})
 
+	with open(dir+".repeated", 'w+') as outfile: json.dump(REPEATED_BLOCK_COUNT, outfile, indent=2)
 	with open(dir, 'w+') as outfile: json.dump(data, outfile, indent=2)
 
 def configure(config):
-	global nbNodes, nbCycles, probJoin, nodeState, nodeCycle, p, sampleSize, miners, floodPercentage, minTxPerBlock, probTxCreate, maxTxCreate
+	global nbNodes, nbCycles, probJoin, nodeState, nodeCycle, p, sampleSize, miners, minTxPerBlock, probTxCreate, maxTxCreate
 
 	IS_CHURN = config.get('CHURN', False)
 	MESSAGE_LOSS = 0.0
@@ -673,7 +695,6 @@ def configure(config):
 	p = config['p']
 	sampleSize = config['sampleSize']
 	miners = config['miners']
-	floodPercentage = config['floodPercentage']
 	minTxPerBlock = config['minTxPerBlock']
 	probTxCreate = config['probTxCreate']
 	maxTxCreate = config['maxTxCreate']

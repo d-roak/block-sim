@@ -36,6 +36,8 @@ REAL_BLOCKCHAIN = []
 TX_NUMBER = 0
 BLOCK_NUMBER = 0
 
+# broadcast tree announcement message replace blockhash and txhash
+
 def init():
 	global nodeState
 
@@ -43,9 +45,10 @@ def init():
 		sim.schedulleExecution(CYCLE, nodeId)
 
 def improve_performance(cycle):
-	if cycle % 100 != 0 or cycle == 0:
+	if cycle % 50 != 0 or cycle == 0:
 		return
 
+	sim.queue.clear()
 	gc.collect()
 	if gc.garbage:
 		gc.garbage[0].set_next(None)

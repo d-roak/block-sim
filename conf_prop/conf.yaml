@@ -2,7 +2,7 @@
 #bitcoin/ethereum less than 8000/10000
 nbNodes : 50
 # number of simulation cycles
-nbCycles : 100
+nbCycles : 100000
 # duration of node cycle
 NODE_CYCLE: 100
 # node cycle drift, zero means perfect clocks 
