@@ -27,7 +27,7 @@ CHURN : False
 # dont use seed
 randomSeed: -1
 #randomSeed: 123456789
-probJoin: 0.05
+probJoin: 0.1
 
 # protocol specific
 probLookup: 0.0
@@ -44,4 +44,4 @@ neighbThreshold: 5
 probTxCreate: 0.5
 maxTxCreate: 1
 miners: 5
-minTxPerBlock: 100
+minTxPerBlock: 200
