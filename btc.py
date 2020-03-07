@@ -70,7 +70,6 @@ def CYCLE(self):
 	if self == 0:
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
-		print("Events: ", sim.getNumberEvents())
 
 	if self not in nodeState:
 		return
@@ -114,7 +113,7 @@ def CYCLE(self):
 
 		# Create transactions
 		# Stop creating txs if there are lots of events
-		if sim.getNumberEvents() < 5000 and random.random() <= probTxCreate:
+		if random.random() <= probTxCreate:
 			for _ in range(0, 1+int(random.random()*maxTxCreate)):
 				t = generateTx(TX_NUMBER)
 				TX_NUMBER += 1
@@ -441,7 +440,7 @@ def generateBlock(self, txs):
 	# Header (prev_hash, merkle_root, timestamp)
 	# Body (merkle_proof(0), txs)
 
-	mt = merkletools.MerkleTools(hash_type="sha256")
+	mt = merkletools.MerkleTools()
 	for t in txs:
 		mt.add_leaf(t.getHash(), True)
 	mt.make_tree()
@@ -501,7 +500,7 @@ class Block:
 		self.header = header
 		self.body = body
 		#sha256(prev_hash, merkle_root, timestamp)
-		h = hashlib.sha256()
+		h = hashlib.sha1()
 		h.update(self.header[0].encode('utf-8'))
 		h.update(self.header[1].encode('utf-8'))
 		h.update(str(self.header[2]).encode('utf-8'))
@@ -533,7 +532,7 @@ class Tx:
 	def __init__(self, n):
 		self.nonce = random.random() * 10000000
 		self.n = n
-		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
+		self.hash = hashlib.sha1(str(self.n).encode('utf-8')).hexdigest()
 
 	def __str__(self):
 		return self.getHash()
