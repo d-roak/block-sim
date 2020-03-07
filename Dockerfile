@@ -10,7 +10,4 @@ RUN pip install --no-cache-dir \
 WORKDIR /root/
 COPY . .
 
-ENV proto
-ENV sim
-
 CMD ./run.sh $proto $sim
