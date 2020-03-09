@@ -22,7 +22,7 @@ INV_MSG, GETHEADERS_MSG, HEADERS_MSG, GETBLOCKS_MSG, GETDATA_MSG, BLOCK_MSG, TX_
 "INV", "GETHEADERS", "HEADERS", "GETBLOCKS", "GETDATA", "BLOCK", "TX"
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, CONNS, \
-BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11
+DB, RELAY_NODES, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11, 12, 13
 
 # Conns
 LAST_PONG, QUEUED_INVS = 0, 1
@@ -30,35 +30,29 @@ LAST_PONG, QUEUED_INVS = 0, 1
 # Inventory types
 MSG_TX, MSG_BLOCK = 0, 1
 
+# Block
+HEADER, BODY = 0, 1
+
 # used only to check if the node is already in the network (simulator)
 # nodes don't have an overview of the network
 NETWORK_NODES = []
+NEXT_ADDR = {}
+MINER_NODES = []
+TX_NODES = []
 REAL_BLOCKCHAIN = []
 REPEATED_BLOCK_COUNT = []
 TX_NUMBER = 0
-BLOCK_NUMBER = 1
-LAST_CYCLE_TIME = 999999999999
+BLOCK_NUMBER = 0
 
 def init():
 	global nodeState
 
 	for nodeId in nodeState:
 		REPEATED_BLOCK_COUNT.append({})
+		NEXT_ADDR[nodeId] = 0
 		sim.schedulleExecution(CYCLE, nodeId)
 
-def improve_performance(cycle):
-	global LAST_CYCLE_TIME
-
-	if time.time() - LAST_CYCLE_TIME > 2:
-		LAST_CYCLE_TIME = time.time()
-	else:
-		LAST_CYCLE_TIME = time.time()
-		return
-	#if cycle % 100 != 0 or cycle == 0:
-	#	return
-
-	# remove half the messages
-	del sim.queue[:int(len(sim.queue)/2)]
+def improve_performance():
 	gc.collect()
 	if gc.garbage:
 		gc.garbage[0].set_next(None)
@@ -67,9 +61,12 @@ def improve_performance(cycle):
 def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
+	#if self == 0 and nodeState[self][CURRENT_CYCLE] % 500 == 0:
 	if self == 0:
+	#	improve_performance()
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
+		print("Queued events: ", sim.getNumberEvents())
 
 	if self not in nodeState:
 		return
@@ -80,56 +77,60 @@ def CYCLE(self):
 			join(self)
 	else:
 		# lookup for new neighbors
-		if connsCount(self) == 0:
-			join(self)
-		elif connsCount(self) <= p:
+		if connsCount(self) < p:
 			lookup(self)
+		for n in nodeState[self][CONNS]:
+			sim.send(ADDR, n, self, ADDR_MSG, [self])
+			nodeState[self][MEMB_MSGS_SENT] += 1
+		#if nodeState[self][RELAY_NODES]:
+		#	for n in random.sample(list(nodeState[self][CONNS].keys()), min(connsCount(self), 2)):
+		#		sim.send(ADDR, n, self, ADDR_MSG, nodeState[self][RELAY_NODES])
+		#		nodeState[self][RELAY_NODES].clear()
+
 
 		# lifecheck and cycle ping
-		lifeCheckDBNeighbs(self)
+		#lifeCheckDBNeighbs(self)
 		for n in nodeState[self][CONNS]:
 			sim.send(PING, n, self, PING_MSG)
 			#nodeState[self][MEMB_MSGS_SENT] += 1
 
 			# Announcement
-			inv = nodeState[self][CONNS][n][QUEUED_INVS]
-			if len(inv) > 0:
+			if len(nodeState[self][CONNS][n][QUEUED_INVS]) > 0:
+				inv = nodeState[self][CONNS][n][QUEUED_INVS]
 				sim.send(INV, n, self, INV_MSG, inv)
 				nodeState[self][DISS_MSGS_SENT] += 1
+				# cleanup
+				del inv
+				nodeState[self][CONNS][n][QUEUED_INVS].clear()
 
-		# Proccess known blocks
-		for _, b in nodeState[self][KNOWN_BLOCKS].copy().items():
-			# Remove known txs that are already in blocks
-			txs = list(b.getBody()[1])
-			for t in txs:
-				if t.getHash() in nodeState[self][KNOWN_TXS]:
-					del nodeState[self][KNOWN_TXS][t.getHash()]
-
-			# Add to blockchain
-			if b.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
-				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], b):
-					nodeState[self][BLOCKCHAIN_HASHES][b.getHash()] = b
-				addBlockToBlockchain(REAL_BLOCKCHAIN, b)
+		for block in nodeState[self][KNOWN_BLOCKS].values():
+			if block[HEADER][1] not in nodeState[self][BLOCKCHAIN_HASHES]:
+				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], block):
+					nodeState[self][BLOCKCHAIN_HASHES][block[HEADER][1]] = block
+					# Remove known txs that are already in blocks
+					txs = list(block[BODY])
+					for t in txs:
+						if t in nodeState[self][KNOWN_TXS]:
+							nodeState[self][KNOWN_TXS].remove(t)
+				addBlockToBlockchain(REAL_BLOCKCHAIN, block)
 
 		# Create transactions
-		# Stop creating txs if there are lots of events
-		if random.random() <= probTxCreate:
-			for _ in range(0, 1+int(random.random()*maxTxCreate)):
-				t = generateTx(TX_NUMBER)
-				TX_NUMBER += 1
-				nodeState[self][KNOWN_TXS][t.getHash()] = t
-				addInvConns(self, Inventory(MSG_TX, t.getHash()))
+		if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
+			t = hashlib.sha1(str(TX_NUMBER).encode('utf-8')).hexdigest()
+			TX_NUMBER += 1
+			nodeState[self][KNOWN_TXS].append(t)
+			addInvConns(self, (MSG_TX, t))
 
 		# Create block
-		# Stop creating blocks at 90% of cycles
-		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
-			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
-				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
-				REPEATED_BLOCK_COUNT[self].update({b.getHash():0})
-				BLOCK_NUMBER += 1
-				nodeState[self][KNOWN_TXS].clear()
-				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
-				addInvConns(self, Inventory(MSG_BLOCK, b.getHash()))
+		if self in MINER_NODES and len(nodeState[self][KNOWN_TXS]) > minTxPerBlock:
+			b = generateBlock(self, nodeState[self][KNOWN_TXS])
+			REPEATED_BLOCK_COUNT[self].update({b[HEADER][1]:0})
+			BLOCK_NUMBER += 1
+			nodeState[self][KNOWN_TXS].clear()
+			nodeState[self][KNOWN_BLOCKS][b[HEADER][1]] = b
+			for n in nodeState[self][CONNS].keys():
+				sim.send(BLOCK, n, self, BLOCK_MSG, b)
+				nodeState[self][DISS_MSGS_SENT] += 1
 
 	nodeState[self][CURRENT_CYCLE] += 1
 	nodeState[self][CURRENT_TIME] += nodeCycle
@@ -151,14 +152,14 @@ def join(self):
 	addConn(self, destNode)
 	sim.send(VERSION, destNode, self, VERSION_MSG)
 	sim.send(GETADDR, destNode, self, GETADDR_MSG)
-	sim.send(GETHEADERS, destNode, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0].getHash(), 0)
 	nodeState[self][MEMB_MSGS_SENT] += 2
-	nodeState[self][DISS_MSGS_SENT] += 1
 
 def lookup(self):
-	for n in list(nodeState[self][CONNS].keys()):
-		sim.send(ADDR, n, self, ADDR_MSG, [self])
-		nodeState[self][MEMB_MSGS_SENT] += 1
+	for n in nodeState[self][DB]:
+		if n not in nodeState[self][CONNS]:
+			addConn(self, n)
+			sim.send(VERSION, n, self, VERSION_MSG)
+			nodeState[self][MEMB_MSGS_SENT] += 1
 
 '''
 Model
@@ -200,6 +201,8 @@ def VERSION(self, source, msg):
 	if self == source:
 		return
 
+	nodeState[self][DB].append(source)
+
 	sim.send(VERACK, source, self, VERACK_MSG)
 	nodeState[self][MEMB_MSGS_SENT] += 1
 
@@ -208,10 +211,14 @@ def VERACK(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][MEMB_MSGS_RECEIVED] += 1
 
+	sim.send(GETHEADERS, source, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0][HEADER][1], 0)
+	nodeState[self][DISS_MSGS_SENT] += 1
+
 
 def GETADDR(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][MEMB_MSGS_RECEIVED] += 1
+	nodeState[self][DB].append(source)
 
 	sim.send(ADDR, source, self, ADDR_MSG, createSample(self))
 	nodeState[self][MEMB_MSGS_SENT] += 1
@@ -225,16 +232,12 @@ def ADDR(self, source, msg, addrs):
 	for n in addrs:
 		if n != self and n not in nodeState[self][CONNS]:
 			temp.append(n)
+			nodeState[self][RELAY_NODES].append(n)
 
 	for n in temp:
 		addConn(self, n)
 		sim.send(VERSION, n, self, VERSION_MSG)
 		nodeState[self][MEMB_MSGS_SENT] += 1
-	
-	#for n in random.sample(list(nodeState[self][CONNS].keys()), min(connsCount(self), 2)):
-	#	sim.send(ADDR, source, self, ADDR_MSG, addrs)
-	#	nodeState[self][MSGS_SENT] += 1
-
 
 # Message Dissemination Messages
 
@@ -243,16 +246,16 @@ def INV(self, source, msg, inv):
 	# It can be sent unsolicited to announce new transactions or blocks, or it can be sent in reply to a getblocks message or mempool message.
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
+	nodeState[self][DB].append(source)
 
 	tmp = []
 	for i in inv:
-		if i.getType() == MSG_TX:
-			if i.getHash() not in nodeState[self][KNOWN_TXS]:
+		if i[0] == MSG_TX:
+			if i[1] not in nodeState[self][KNOWN_TXS]:
 				tmp.append(i)
-		elif i.getType() == MSG_BLOCK:
-			if i.getHash() not in nodeState[self][KNOWN_BLOCKS]:
+		elif i[0] == MSG_BLOCK:
+			if i[1] not in nodeState[self][KNOWN_BLOCKS]:
 				tmp.append(i)
-	
 	if len(tmp) == 0:
 		return
 	sim.send(GETDATA, source, self, GETDATA_MSG, tmp)
@@ -268,14 +271,14 @@ def GETHEADERS(self, source, msg, start, end):
 	tmp = []
 	started = False
 	for b in nodeState[self][BLOCKCHAIN]:
-		if b.getHash() == end:
-			tmp.append(b.getHeader())
+		if b[HEADER][1] == end:
+			tmp.append(b[HEADER])
 			break
 		if started:
-			tmp.append(b.getHeader())
-		elif not started and b.getHash() == start:
+			tmp.append(b[HEADER])
+		elif not started and b[HEADER][1] == start:
 			started = True
-			tmp.append(b.getHeader())
+			tmp.append(b[HEADER])
 		else:
 			continue
 
@@ -302,8 +305,8 @@ def GETBLOCKS(self, source, msg, headers):
 
 	tmp = []
 	for b in nodeState[self][BLOCKCHAIN]:
-		if b.getHeader() in headers:
-			tmp.append(Inventory(MSG_BLOCK, b.getHash()))
+		if b[HEADER] in headers:
+			tmp.append((MSG_BLOCK, b[HEADER][1]))
 
 	sim.send(INV, source, self, INV_MSG, tmp)
 	nodeState[self][DISS_MSGS_SENT] += 1
@@ -316,16 +319,11 @@ def GETDATA(self, source, msg, inv):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	for i in inv:
-		if i.getType() == MSG_TX:
-			t = nodeState[self][KNOWN_TXS].get(i.getHash())
-			if t is None:
-				continue
-			sim.send(TX, source, self, TX_MSG, t)
+		if i[0] == MSG_TX:
+			sim.send(TX, source, self, TX_MSG, i[1])
 			nodeState[self][DISS_MSGS_SENT] += 1
-		elif i.getType() == MSG_BLOCK:
-			tmp = nodeState[self][BLOCKCHAIN_HASHES].copy()
-			tmp.update(nodeState[self][KNOWN_BLOCKS])
-			b = tmp.get(i.getHash())
+		elif i[0] == MSG_BLOCK:
+			b = nodeState[self][KNOWN_BLOCKS].get(i[1])
 			if b is None:
 				continue
 			sim.send(BLOCK, source, self, BLOCK_MSG, b)
@@ -340,16 +338,17 @@ def BLOCK(self, source, msg, block):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 	
-	if block.getHash() not in REPEATED_BLOCK_COUNT[self]:
-		REPEATED_BLOCK_COUNT[self].update({block.getHash():1})
+	if block[HEADER][1] not in REPEATED_BLOCK_COUNT[self]:
+		REPEATED_BLOCK_COUNT[self].update({block[HEADER][1]:1})
 	else:
-		REPEATED_BLOCK_COUNT[self][block.getHash()] += 1
+		REPEATED_BLOCK_COUNT[self][block[HEADER][1]] += 1
+		return
 
 	if verifyBlocks(self, block):
-		if block.getHash() not in nodeState[self][KNOWN_BLOCKS]:
-			nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
-			addInvConns(self, Inventory(MSG_BLOCK, block.getHash()))
-		rmInvConn(self, source, MSG_BLOCK, block.getHash())
+		if block[HEADER][1] not in nodeState[self][KNOWN_BLOCKS]:
+			nodeState[self][KNOWN_BLOCKS][block[HEADER][1]] = block
+			addInvConns(self, (MSG_BLOCK, block[HEADER][1]))
+		rmInvConn(self, source, MSG_BLOCK, block[HEADER][1])
 
 
 def TX(self, source, msg, tx):
@@ -360,10 +359,10 @@ def TX(self, source, msg, tx):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	if verifyTxs(self, tx):
-		if tx.getHash() not in nodeState[self][KNOWN_TXS]:
-			nodeState[self][KNOWN_TXS][tx.getHash()] = tx
-			addInvConns(self, Inventory(MSG_TX, tx.getHash()))
-		rmInvConn(self, source, MSG_TX, tx.getHash())
+		if tx not in nodeState[self][KNOWN_TXS]:
+			nodeState[self][KNOWN_TXS].append(tx)
+			addInvConns(self, (MSG_TX, tx))
+		rmInvConn(self, source, MSG_TX, tx)
 
 
 # Node functions
@@ -377,12 +376,14 @@ def createNode(id):
 	# DISS_MSGS_SENT		# stats
 	# ID					# public
 	# CONNS					# private
+	# DB					# private
+	# RELAY_NODEs			# private
 	# BLOCKCHAIN			# private
 	# BLOCKCHAIN_HASHES		# private
 	# KNOWN_TXS				# private
 	# KNOWN_BLOCKS			# private
 
-	node = [0, 0, 0, 0, 0, 0, id, dict(), [], dict(), dict(), dict()]
+	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], dict(), [], dict()]
 
 	return node
 
@@ -394,6 +395,8 @@ def addConn(self, node):
 	if self == node:
 		return
 	nodeState[self][CONNS][node] = [nodeState[self][CURRENT_TIME], []]
+	if node not in nodeState[self][DB]:
+		nodeState[self][DB].append(node)
 
 def connsCount(self):
 	return len(nodeState[self][CONNS])
@@ -406,7 +409,7 @@ def rmInvConn(self, node, type, hash):
 	if node not in nodeState[self][CONNS]:
 		return
 	for i in nodeState[self][CONNS][node][QUEUED_INVS]:
-		if type == i.getType() and hash == i.getHash():
+		if type == i[0] and hash == i[1]:
 			nodeState[self][CONNS][node][QUEUED_INVS].remove(i)
 
 def updateEntryPong(self, node, time):
@@ -431,43 +434,38 @@ def lifeCheckDBNeighbs(self):
 
 # Blockchain methods
 def generateGenesisBlock():
-	header = ("0", "0", 0)
-	body = ("0", [])
-	return Block(header, body)
+	global BLOCK_NUMBER
+	header = (0, BLOCK_NUMBER, 0)
+	BLOCK_NUMBER += 1
+	body = []
+	return (header, body)
 
 def generateBlock(self, txs):
+	global BLOCK_NUMBER
 	# Simplified version without extra stuff
-	# Header (prev_hash, merkle_root, timestamp)
-	# Body (merkle_proof(0), txs)
+	# Header (prev_hash, hash, timestamp)
+	# Body (txs)
 
-	mt = merkletools.MerkleTools()
-	for t in txs:
-		mt.add_leaf(t.getHash(), True)
-	mt.make_tree()
-
-	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), nodeState[self][CURRENT_TIME])
-	body = (mt.get_proof(0), txs)
-	block = Block(header, body)
+	header = (nodeState[self][BLOCKCHAIN][-1][HEADER][0], BLOCK_NUMBER, nodeState[self][CURRENT_TIME])
+	BLOCK_NUMBER += 1
+	body = txs
+	block = (header, body)
 	return block
-
-def generateTx(n):
-	return Tx(n)
 
 def addBlockToBlockchain(blockchain, block):
 	# Used for local blockchains and real blockchain
 	for b in blockchain:
-		if b.getHash() == block.getHash():
+		if b[HEADER][1] == block[HEADER][1]:
 			return False
-
 	for i, b in enumerate(blockchain):
 		# Confirm prev_hash
-		if b.getHash() == block.getHeader()[0]:
+		if b[HEADER][1] == block[HEADER][0]:
 			# Confirm timestamp
-			if block.getHeader()[2] < b.getHeader()[2]:
+			if block[HEADER][2] < b[HEADER][2]:
 				return False
 			# Check if there are more blocks in chain
-			elif blockchain[-1].getHash() != b.getHash():
-				if blockchain[i + 1].getHeader()[2] > block.getHeader()[2]:
+			elif blockchain[-1][HEADER][1] != b[HEADER][1]:
+				if blockchain[i + 1][HEADER][2] > block[HEADER][2]:
 					del blockchain[i+1:]
 					blockchain.append(block)
 					return True
@@ -489,89 +487,6 @@ def verifyBlocks(self, blocks):
 
 def verifyTxs(self, txs):
 	return True
-
-# Block definition
-class Block:
-	def __init__(self, header, body):
-		# Simplified version without extra stuff
-		# Header (prev_hash, merkle_root, timestamp)
-		# Body (merkle_proof(0), txs)
-		self.nonce = random.random() * 10000000
-		self.header = header
-		self.body = body
-		#sha256(prev_hash, merkle_root, timestamp)
-		h = hashlib.sha1()
-		h.update(self.header[0].encode('utf-8'))
-		h.update(self.header[1].encode('utf-8'))
-		h.update(str(self.header[2]).encode('utf-8'))
-		self.hash = h.hexdigest()
-
-	def __str__(self):
-		return self.getHash()
-
-	def __eq__(self, other):
-		if self.nonce == other.nonce:
-			return 0
-		elif self.nonce < other.nonce:
-			return -1
-		else:
-			return 1
-
-	def getHeader(self):
-		return self.header
-
-	def getHash(self):
-		return self.hash
-
-	def getBody(self):
-		return self.body
-
-
-# Transaction definition
-class Tx:
-	def __init__(self, n):
-		self.nonce = random.random() * 10000000
-		self.n = n
-		self.hash = hashlib.sha1(str(self.n).encode('utf-8')).hexdigest()
-
-	def __str__(self):
-		return self.getHash()
-
-	def __eq__(self, other):
-		if self.nonce == other.nonce:
-			return 0
-		elif self.nonce < other.nonce:
-			return -1
-		else:
-			return 1
-	
-	def getHash(self):
-		return self.hash
-
-
-# Inventory definition
-class Inventory:
-	def __init__(self, type, hash):
-		self.nonce = random.random() * 10000000
-		self.type = type
-		self.hash = hash
-
-	def __str__(self):
-		return self.hash
-	
-	def __eq__(self, other):
-		if self.nonce == other.nonce:
-			return 0
-		elif self.nonce < other.nonce:
-			return -1
-		else:
-			return 1
-
-	def getType(self):
-		return self.type
-
-	def getHash(self):
-		return self.hash
 
 
 # Simulator
@@ -621,13 +536,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b.getHash() not in nodeState[n][BLOCKCHAIN_HASHES] and b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
-				bc_right = False
-				bc_wrong += 1
-				break
-		bc_right = True
-		for b in REAL_BLOCKCHAIN:
-			if b not in nodeState[n][BLOCKCHAIN]:
+			if b[HEADER][1] not in nodeState[n][BLOCKCHAIN_HASHES] and b[HEADER][1] not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -700,7 +609,7 @@ def wrapup(dir):
 	with open(dir, 'w+') as outfile: json.dump(data, outfile, indent=2)
 
 def configure(config):
-	global nbNodes, nbCycles, probJoin, nodeState, nodeCycle, p, sampleSize, miners, minTxPerBlock, probTxCreate, maxTxCreate
+	global nbNodes, nbCycles, probJoin, nodeState, nodeCycle, p, sampleSize, minTxPerBlock, txPerCycle, MINER_NODES, TX_NODES
 
 	IS_CHURN = config.get('CHURN', False)
 	MESSAGE_LOSS = 0.0
@@ -721,8 +630,7 @@ def configure(config):
 	sampleSize = config['sampleSize']
 	miners = config['miners']
 	minTxPerBlock = config['minTxPerBlock']
-	probTxCreate = config['probTxCreate']
-	maxTxCreate = config['maxTxCreate']
+	txPerCycle = config['txPerCycle']
 
 	latencyTablePath = config['LATENCY_TABLE']
 	latencyValue = None
@@ -744,8 +652,14 @@ def configure(config):
 
 	for n in range(nbNodes):
 		nodeState[n] = createNode(n)
+		nodeState[n][KNOWN_BLOCKS][genesisBlock[HEADER][1]] = genesisBlock
 		nodeState[n][BLOCKCHAIN].append(genesisBlock)
-		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock.getHash()] = genesisBlock
+		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock[HEADER][1]] = genesisBlock
+
+	for i in random.sample(range(nbNodes), miners):
+		MINER_NODES.append(i)
+	for i in range(0, nbCycles):
+		TX_NODES.append(random.sample(range(nbNodes), txPerCycle))
 
 	sim.init(nodeCycle, nodeDrift, latencyTable, 0)
 
