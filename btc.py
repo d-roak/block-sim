@@ -13,6 +13,7 @@ import hashlib
 import merkletools
 import statistics
 import time
+import datetime
 
 from sim import sim
 import utils
@@ -62,10 +63,12 @@ def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
 	if self == 0 and nodeState[self][CURRENT_CYCLE] % 500 == 0:
-		improve_performance()
-		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
+		value = datetime.datetime.fromtimestamp(time.time())
+		logger.info('time: {} node: {} cycle: {}'.format(value.strftime('%Y-%m-%d %H:%M:%S'), self, nodeState[self][CURRENT_CYCLE]))
+		print("Time:", value.strftime('%Y-%m-%d %H:%M:%S'))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
 		print("Queued events: ", sim.getNumberEvents())
+		improve_performance()
 
 	if self not in nodeState:
 		return
