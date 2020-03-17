@@ -1,10 +1,10 @@
 # system settings, mandatory
 #bitcoin/ethereum less than 8000/10000
-nbNodes : 50
+nbNodes : 200
 # number of simulation cycles
-nbCycles : 100000
+nbCycles : 1000
 # duration of node cycle
-NODE_CYCLE: 100
+NODE_CYCLE: 1250
 # node cycle drift, zero means perfect clocks 
 NODE_DRIFT: 0
 # link latency, 
@@ -27,7 +27,7 @@ CHURN : False
 # dont use seed
 randomSeed: -1
 #randomSeed: 123456789
-probJoin: 0.1
+probJoin: 1
 
 # protocol specific
 probLookup: 0.0
@@ -36,12 +36,12 @@ probLookup: 0.0
 fanout: 0.2
 
 # TODO change for high number of nodes
-tableSize: 10
+tableSize: 20
 sampleSize: 250
 # min number of neighbors
 neighbThreshold: 5
 
-probTxCreate: 0.5
-maxTxCreate: 1
+txPerCycle: 2
 miners: 5
-minTxPerBlock: 200
+#minTxPerBlock: 400
+minTxPerBlock: 460

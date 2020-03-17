@@ -12,6 +12,7 @@ import json
 import math
 import statistics
 import merkletools
+import datetime
 import time
 
 from sim import sim
@@ -25,15 +26,17 @@ STATUS_MSG, NEWBLOCKHASHES_MSG, TRANSACTIONS_MSG, GETBLOCKHEADERS_MSG, BLOCKHEAD
 
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, TABLE, BLOCKCHAIN, \
-BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, ANN_TXS, SENT_STATUS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+BLOCKCHAIN_HASHES, KNOWN_TXS, QUEUED_TXS, ANN_TXS, KNOWN_BLOCKS, QUEUED_BLOCKS, SENT_STATUS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
 
 # used only to check if the node is already in the network
 # nodes don't have an overview of the network
 NETWORK_NODES = []
 REAL_BLOCKCHAIN = []
+REPEATED_BLOCK_COUNT = []
+MINER_NODES = []
+TX_NODES = []
 TX_NUMBER = 0
-BLOCK_NUMBER = 1
-LAST_CYCLE_TIME = 999999999999
+BLOCK_NUMBER = 0
 
 #used for recursive lookup
 neighborsQueue = {}
@@ -42,24 +45,14 @@ def init():
 	global nodeState
 
 	for nodeId in nodeState:
+		REPEATED_BLOCK_COUNT.append({})
 		# init k-buckets
 		for i in range(0, bucketsNumber):
 			nodeState[nodeId][TABLE][i] = deque([ ])
 
 		sim.schedulleExecution(CYCLE, nodeId)
 
-def improve_performance(cycle):
-	global LAST_CYCLE_TIME
-
-	if time.time() - LAST_CYCLE_TIME > 2:
-		LAST_CYCLE_TIME = time.time()
-	else:
-		LAST_CYCLE_TIME = time.time()
-		return
-
-	# remove half the messages
-	sim.queue = sim.queue[int(len(sim.queue)/2):]
-
+def improve_performance():
 	gc.collect()
 	if gc.garbage:
 		gc.garbage[0].set_next(None)
@@ -68,10 +61,13 @@ def improve_performance(cycle):
 def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
-	if self == 0:
+	if self == 0 and nodeState[self][CURRENT_CYCLE] % 500 == 0:
+		value = datetime.datetime.fromtimestamp(time.time())
 		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
+		print("Time:", value.strftime('%Y-%m-%d %H:%M:%S'))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
-		#improve_performance(nodeState[self][CURRENT_CYCLE])
+		print("Queued events: ", sim.getNumberEvents())
+		improve_performance()
 
 	if self not in nodeState:
 		return
@@ -92,56 +88,62 @@ def CYCLE(self):
 			sim.send(PING, n, self, PING_MSG)
 			#nodeState[self][MEMB_MSGS_SENT] += 1
 
-		if random.random() <= probLookup:
-			try:
-				p = Thread(target=lookup, args=[self, self, False])
-				p.start()
-				p.join()
-				#lookup(self, self, False)
-			except Exception as e:
-				print(e.with_traceback())
+		# 24h = 8 640 000ms
+		if nodeState[self][CURRENT_TIME] % 875000 == 0: 
+			lookup(self, self)
 
 		# Message dissemination
 		neighbors = getNeighbors(self)
 
-		# Blockchain maintenance
-		# Create transactions
-		if random.random() <= probTxCreate:
-			for _ in range(0, 1+int(random.random()*maxTxCreate)):
-				t = generateTx(TX_NUMBER)
-				TX_NUMBER += 1
-				nodeState[self][KNOWN_TXS][t.getHash()] = t
-
+		# Blockchain maintenance	
 		# Announcements
-		for n in random.sample(neighbors, int(len(neighbors)*floodPercentage)):
-			sim.send(NEWBLOCKHASHES, n, self, NEWBLOCKHASHES_MSG, list(nodeState[self][KNOWN_BLOCKS].keys()))
-			nodeState[self][DISS_MSGS_SENT] += 1
+		for n in neighbors:
+			tmp = []
+			for b in nodeState[self][QUEUED_BLOCKS]:
+				tmp.append(b.getHash())
+			if tmp:
+				sim.send(NEWBLOCKHASHES, n, self, NEWBLOCKHASHES_MSG, tmp)
+				nodeState[self][DISS_MSGS_SENT] += 1
+			del tmp
+
+			sendTxs = []
+			for h in nodeState[self][ANN_TXS]:
+				if n not in nodeState[self][ANN_TXS][h] and h in nodeState[self][KNOWN_TXS]:
+					t = nodeState[self][KNOWN_TXS][h]
+					if t in nodeState[self][QUEUED_TXS]:		
+						sendTxs.append(t)
+			if sendTxs:
+				sim.send(TRANSACTIONS, n, self, TRANSACTIONS_MSG, sendTxs)
+				nodeState[self][DISS_MSGS_SENT] += 1
 
 		# Proccess known blocks
-		for _, b in nodeState[self][KNOWN_BLOCKS].copy().items():
-			# Remove known txs that are already in blocks
-			txs = list(b.getBody()[1])
-			for t in txs:
-				if t.getHash() in nodeState[self][KNOWN_TXS]:
-					del nodeState[self][KNOWN_TXS][t.getHash()]
-
+		for b in nodeState[self][QUEUED_BLOCKS]:
 			# Add to blockchain
 			if b.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
 				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], b):
 					nodeState[self][BLOCKCHAIN_HASHES][b.getHash()] = b
+					cleanupTxsMsgs(self, b)
 				addBlockToBlockchain(REAL_BLOCKCHAIN, b)
-
-			del nodeState[self][KNOWN_BLOCKS][b.getHash()]
+		nodeState[self][QUEUED_BLOCKS].clear()
 
 		# Create block
 		# Stop creating blocks at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
-			if len(nodeState[self][KNOWN_TXS]) > minTxPerBlock and self < miners:
-				b = generateBlock(self, nodeState[self][KNOWN_TXS].values())
-				BLOCK_NUMBER += 1
-				nodeState[self][KNOWN_TXS].clear()
-				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
+			# Create transactions
+			if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
+				t = generateTx(TX_NUMBER)
+				TX_NUMBER += 1
+				nodeState[self][KNOWN_TXS][t.getHash()] = t
+				nodeState[self][QUEUED_TXS].append(t)
+				if not nodeState[self][ANN_TXS].get(t.getHash()):
+					nodeState[self][ANN_TXS][t.getHash()] = []
 
+			if len(nodeState[self][QUEUED_TXS]) > minTxPerBlock and self in MINER_NODES:
+				b = generateBlock(self, nodeState[self][QUEUED_TXS])
+				REPEATED_BLOCK_COUNT[self].update({b.getHash():0})
+				BLOCK_NUMBER += 1
+				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
+				nodeState[self][QUEUED_BLOCKS].append(b)
 				# Send NewBlock to math.sqrt(neighbors)
 				# Send NewBlockHashes to remaining
 				rootSample = random.sample(neighbors, int(math.sqrt(len(neighbors))))
@@ -151,18 +153,6 @@ def CYCLE(self):
 					else:
 						sim.send(NEWBLOCKHASHES, n, self, NEWBLOCKHASHES_MSG, [b.getHash()])
 					nodeState[self][DISS_MSGS_SENT] += 1
-		
-		for t in nodeState[self][KNOWN_TXS]:
-			if not nodeState[self][ANN_TXS].get(t):
-				nodeState[self][ANN_TXS][t] = []
-		for n in getNeighbors(self):
-			sendTxs = []
-			for h in nodeState[self][ANN_TXS]:
-				if n not in nodeState[self][ANN_TXS][h] and h in nodeState[self][KNOWN_TXS]:
-					sendTxs.append(nodeState[self][KNOWN_TXS][h])
-			if sendTxs:
-				sim.send(TRANSACTIONS, n, self, TRANSACTIONS_MSG, sendTxs)
-				nodeState[self][DISS_MSGS_SENT] += 1
 
 	nodeState[self][CURRENT_CYCLE] += 1
 	nodeState[self][CURRENT_TIME] += nodeCycle
@@ -174,16 +164,19 @@ def join(self):
 		NETWORK_NODES.append(self)
 	if len(NETWORK_NODES) < 2:
 		return
-	destNode = random.choice(NETWORK_NODES)
-	while destNode == self:
-		destNode = random.choice(NETWORK_NODES)
-	addEntryDb(self, destNode)
-	addEntryBucket(self, destNode)
-	sim.send(FINDNODE, destNode, self, FINDNODE_MSG, destNode)
-	nodeState[self][SENT_STATUS].append(destNode)
-	sim.send(STATUS, destNode, self, STATUS_MSG, nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][BLOCKCHAIN][-1].getNumber())
-	nodeState[self][DISS_MSGS_SENT] += 1
-	nodeState[self][MEMB_MSGS_SENT] += 1
+
+	destNodes = random.choices(NETWORK_NODES, k=min(len(NETWORK_NODES)-1, 5))
+	while self in destNodes:
+		destNodes = random.choices(NETWORK_NODES, k=min(len(NETWORK_NODES)-1, 5))
+
+	for destNode in destNodes:
+		addEntryDb(self, destNode)
+		addEntryBucket(self, destNode)
+		sim.send(FINDNODE, destNode, self, FINDNODE_MSG, destNode)
+		nodeState[self][SENT_STATUS].append(destNode)
+		sim.send(STATUS, destNode, self, STATUS_MSG, nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][BLOCKCHAIN][-1].getNumber())
+		nodeState[self][DISS_MSGS_SENT] += 1
+		nodeState[self][MEMB_MSGS_SENT] += 1
 
 
 '''
@@ -261,7 +254,7 @@ def STATUS(self, source, msg, bestHash, blockNumber):
 		nodeState[self][SENT_STATUS].remove(source)
 
 	# Send Transactions
-	sim.send(TRANSACTIONS, source, self, TRANSACTIONS_MSG, list(nodeState[self][KNOWN_TXS].values()))
+	sim.send(TRANSACTIONS, source, self, TRANSACTIONS_MSG, nodeState[self][QUEUED_TXS])
 	nodeState[self][DISS_MSGS_SENT] += 1
 
 	# Request Headers
@@ -278,9 +271,9 @@ def NEWBLOCKHASHES(self, source, msg, hashes):
 	for h in hashes:
 		if h not in nodeState[self][KNOWN_BLOCKS].keys():
 			tmp.append(h)
-
-	sim.send(GETBLOCKBODIES, source, self, GETBLOCKBODIES_MSG, tmp)
-	nodeState[self][DISS_MSGS_SENT] += 1
+	if tmp:
+		sim.send(GETBLOCKBODIES, source, self, GETBLOCKBODIES_MSG, tmp)
+		nodeState[self][DISS_MSGS_SENT] += 1
 
 
 def TRANSACTIONS(self, source, msg, txs):
@@ -290,6 +283,8 @@ def TRANSACTIONS(self, source, msg, txs):
 	if verifyTxs(self, txs):
 		for t in txs:
 			nodeState[self][KNOWN_TXS][t.getHash()] = t
+			if t not in nodeState[self][QUEUED_TXS]:
+				nodeState[self][QUEUED_TXS].append(t)
 			if not nodeState[self][ANN_TXS].get(t.getHash()):
 				nodeState[self][ANN_TXS][t.getHash()] = []
 			if source not in nodeState[self][ANN_TXS][t.getHash()]:
@@ -370,6 +365,11 @@ def BLOCKBODIES(self, source, msg, blocks):
 
 	if verifyBlocks(self, blocks):
 		for b in blocks:
+			if b.getHash() not in REPEATED_BLOCK_COUNT[self]:
+				REPEATED_BLOCK_COUNT[self].update({b.getHash():1})
+			else:
+				REPEATED_BLOCK_COUNT[self][b.getHash()] += 1
+			nodeState[self][QUEUED_BLOCKS].append(b)
 			nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 
 
@@ -377,10 +377,16 @@ def NEWBLOCK(self, source, msg, block):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
+	if block.getHash() not in REPEATED_BLOCK_COUNT[self]:
+		REPEATED_BLOCK_COUNT[self].update({block.getHash():1})
+	else:
+		REPEATED_BLOCK_COUNT[self][block.getHash()] += 1
+
 	if block.getHash() in nodeState[self][KNOWN_BLOCKS]:
 		propagate = False
 	else:
 		propagate = True
+		nodeState[self][QUEUED_BLOCKS].append(block)
 		nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
 
 	#propagation
@@ -413,11 +419,13 @@ def createNode(id):
 	# BLOCKCHAIN			# private
 	# BLOCKCHAIN_HASHES		# private
 	# KNOWN_TXS				# private
-	# KNOWN_BLOCKS			# private
+	# QUEUED_TXS			# private
 	# ANN_TXS				# private
+	# KNOWN_BLOCKS			# private
+	# QUEUED_BLOCKS			# private
 	# SENT_STATUS			# private
 
-	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), [], dict(), dict(), dict(), dict(), []]
+	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), [], dict(), dict(), [], dict(), dict(), [], []]
 
 
 # DB (not persistent)
@@ -533,8 +541,18 @@ def lookupNeighbors(self, target):
 		return []
 	return temp[min(temp.keys())]
 
-def lookup(self, target, stopMatch):
+def lookup(self, target):
+	queries = 0
+	for n in lookupNeighbors(self, target):
+		if queries >= alpha:
+			break
+		sim.send(FINDNODE, n, self, FINDNODE_MSG, target)
+		nodeState[self][MEMB_MSGS_SENT] += 1
+		queries += 1
+
+def lookupBack(self, target, stopMatch):
 	# recursive lookup
+	# TODO move out of threads
 	global neighborsQueue
 	global nodeState
 
@@ -594,8 +612,10 @@ def kadDistance(n1, n2):
 # Blockchain functions
 
 def generateGenesisBlock():
-	header = ("0", "0", 0)
-	body = ("0", [])
+	global BLOCK_NUMBER
+	header = ("0", 0)
+	BLOCK_NUMBER += 1
+	body = ([])
 	block = Block(0, header, body)
 	return block
 
@@ -604,21 +624,47 @@ def generateBlock(self, txs):
 	# Header (prev_hash, merkle_root, timestamp)
 	# Body (merkle_proof(0), txs)
 
-	mt = merkletools.MerkleTools(hash_type="sha256")
-	for t in txs:
-		mt.add_leaf(t.getHash(), True)
-	mt.make_tree()
-
 	number = nodeState[self][BLOCKCHAIN][-1].getNumber() + 1
-	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), mt.get_merkle_root(), nodeState[self][CURRENT_TIME])
-	body = (mt.get_proof(0), txs)
+	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][CURRENT_TIME])
+	body = (txs)
 	block = Block(number, header, body)
 	return block
 
 def generateTx(n):
 	return Tx(n)
 
+
+def cleanupTxsMsgs(self, block):
+	# Remove known txs that are already in blocks
+	txs = block.getBody()
+	for t in txs:
+		if t in nodeState[self][QUEUED_TXS]:
+			nodeState[self][QUEUED_TXS].remove(t)
+		if t.getHash() in nodeState[self][ANN_TXS]:
+			del nodeState[self][ANN_TXS][t.getHash()]
+	
+
 def addBlockToBlockchain(blockchain, block):
+	# Used for local blockchains and real blockchain
+	for b in blockchain:
+		if b.getHash() == block.getHash():
+			return False
+
+	b = blockchain[-1]
+	# Confirm prev_hash
+	if b.getHash() == block.getHeader()[0]:
+		# Confirm timestamp
+		if block.getHeader()[1] < b.getHeader()[1]:
+			return False
+		elif block.getNumber() < b.getNumber():
+			return False
+		else:		
+			blockchain.append(block)
+			return True
+	
+	return False
+
+def addBlockToBlockchain2(blockchain, block):
 	# Used for local blockchains and real blockchain
 	for b in blockchain:
 		if b.getHash() == block.getHash():
@@ -628,13 +674,13 @@ def addBlockToBlockchain(blockchain, block):
 		# Confirm prev_hash
 		if b.getHash() == block.getHeader()[0]:
 			# Confirm timestamp
-			if block.getHeader()[2] < b.getHeader()[2]:
+			if block.getHeader()[1] < b.getHeader()[1]:
 				return False
 			elif block.getNumber() < b.getNumber():
 				return False
 			# Check if there are more blocks in chain
 			elif blockchain[-1].getHash() != b.getHash():
-				if blockchain[i + 1].getHeader()[2] > block.getHeader()[2]:
+				if blockchain[i + 1].getHeader()[1] > block.getHeader()[1]:
 					del blockchain[i+1:]
 					blockchain.append(block)
 					return True
@@ -649,47 +695,46 @@ def addBlockToBlockchain(blockchain, block):
 	return False
 
 def verifyHeaders(self, headers):
-	# TODO ???
 	return True
 
 def verifyBlocks(self, blocks):
-	# TODO ???
 	return True
 
 def verifyTxs(self, txs):
-	# TODO ???
 	return True
 
 # Block definition
 class Block:
-	def __init__(self, number, header, body):
+	def __init__(self, n, header, body):
 		# Simplified version without extra stuff
 		# Header (prev_hash, merkle_root, timestamp)
 		# Body (merkle_proof(0), txs)
-		self.number = number
-		self.nonce = random.random() * 10000000
+		self.n = n
 		self.header = header
 		self.body = body
 		#sha256(prev_hash, merkle_root, timestamp)
 		h = hashlib.sha256()
 		h.update(self.header[0].encode('utf-8'))
-		h.update(self.header[1].encode('utf-8'))
-		h.update(str(self.header[2]).encode('utf-8'))
+		h.update(str(self.header[1]).encode('utf-8'))
 		self.hash = h.hexdigest()
 
-	def __str__(self):
-		return self.getHash()
-
-	def __eq__(self, other):
-		if self.nonce == other.nonce:
+	def __cmp__(self, other):
+		if self.n == other.n:
 			return 0
-		elif self.nonce < other.nonce:
+		elif self.n < other.n:
 			return -1
 		else:
 			return 1
 
+	def __eq__(self, other):
+		return self.__cmp__(other) == 0
+	def __lt__(self, other):
+		return self.__cmp__(other) < 0
+	def __gt__(self, other):
+		return self.__cmp__(other) > 0
+
 	def getNumber(self):
-		return self.number
+		return self.n
 
 	def getHeader(self):
 		return self.header
@@ -704,21 +749,24 @@ class Block:
 # Transaction definition
 class Tx:
 	def __init__(self, n):
-		self.nonce = random.random() * 10000000
 		self.n = n
 		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
 
-	def __str__(self):
-		return self.getHash()
-
-	def __eq__(self, other):
-		if self.nonce == other.nonce:
+	def __cmp__(self, other):
+		if self.n == other.n:
 			return 0
-		elif self.nonce < other.nonce:
+		elif self.n < other.n:
 			return -1
 		else:
 			return 1
-	
+
+	def __eq__(self, other):
+		return self.__cmp__(other) == 0
+	def __lt__(self, other):
+		return self.__cmp__(other) < 0
+	def __gt__(self, other):
+		return self.__cmp__(other) > 0
+
 	def getHash(self):
 		return self.hash
 
@@ -848,11 +896,12 @@ def wrapup(dir):
 		#"blockchain": blockchain,
 	})
 
+	with open(dir+".repeated", 'w+') as outfile: json.dump(REPEATED_BLOCK_COUNT, outfile, indent=2)
 	with open(dir, 'w+') as outfile: json.dump(data, outfile, indent=2)
 
 def configure(config):
-	global nbNodes, nbCycles, probJoin, probLookup, nodeState, nodeCycle, bucketSize, bucketsNumber,\
-	alpha, lookupTimeout, maxBlockHeaders, miners, minTxPerBlock, probTxCreate, maxTxCreate, floodPercentage
+	global nbNodes, nbCycles, probJoin, nodeState, nodeCycle, bucketSize, bucketsNumber,\
+	alpha, lookupTimeout, maxBlockHeaders, miners, txPerCycle, minTxPerBlock
 
 	IS_CHURN = config.get('CHURN', False)
 	MESSAGE_LOSS = 0.0
@@ -868,17 +917,14 @@ def configure(config):
 	if randomSeed != -1:
 		random.seed(randomSeed)
 	probJoin = config['probJoin']
-	probLookup = config['probLookup']
 	bucketSize = config['bucketSize']
 	bucketsNumber = config['bucketsNumber']
 	alpha = config['alpha']
 	lookupTimeout = config['lookupTimeout']
 	maxBlockHeaders = config['maxBlockHeaders']
 	miners = config['miners']
-	floodPercentage = config['floodPercentage']
+	txPerCycle = config['txPerCycle']
 	minTxPerBlock = config['minTxPerBlock']
-	probTxCreate = config['probTxCreate']
-	maxTxCreate = config['maxTxCreate']
 
 	latencyTablePath = config['LATENCY_TABLE']
 	latencyValue = None
@@ -902,6 +948,12 @@ def configure(config):
 		nodeState[n] = createNode(n)
 		nodeState[n][BLOCKCHAIN].append(genesisBlock)
 		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock.getHash()] = genesisBlock
+		nodeState[n][KNOWN_BLOCKS][genesisBlock.getHash()] = genesisBlock
+
+	for i in random.sample(range(nbNodes), miners):
+		MINER_NODES.append(i)
+	for i in range(0, nbCycles):
+		TX_NODES.append(random.sample(range(nbNodes), txPerCycle))
 
 	sim.init(nodeCycle, nodeDrift, latencyTable, 0)
 

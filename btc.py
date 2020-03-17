@@ -96,18 +96,15 @@ def CYCLE(self):
 
 
 		# lifecheck and cycle ping
-		#lifeCheckDBNeighbs(self)
+		lifeCheckDBNeighbs(self)
 		for n in nodeState[self][CONNS]:
 			sim.send(PING, n, self, PING_MSG)
 			#nodeState[self][MEMB_MSGS_SENT] += 1
 
 			# Announcement
 			if len(nodeState[self][CONNS][n][QUEUED_INVS]) > 0:
-				inv = nodeState[self][CONNS][n][QUEUED_INVS]
-				sim.send(INV, n, self, INV_MSG, inv.copy())
+				sim.send(INV, n, self, INV_MSG, nodeState[self][CONNS][n][QUEUED_INVS].copy())
 				nodeState[self][DISS_MSGS_SENT] += 1
-				# cleanup
-				del inv
 				nodeState[self][CONNS][n][QUEUED_INVS].clear()
 
 		for block in nodeState[self][KNOWN_BLOCKS].values():
@@ -121,23 +118,25 @@ def CYCLE(self):
 							nodeState[self][KNOWN_TXS].remove(t)
 				addBlockToBlockchain(REAL_BLOCKCHAIN, block)
 
-		# Create transactions
-		if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
-			t = hashlib.sha1(str(TX_NUMBER).encode('utf-8')).hexdigest()
-			TX_NUMBER += 1
-			nodeState[self][KNOWN_TXS].append(t)
-			addInvConns(self, [MSG_TX, t])
+		# Stop creating blocks/txs at 90% of cycles
+		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
+			# Create transactions
+			if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
+				t = hashlib.sha1(str(TX_NUMBER).encode('utf-8')).hexdigest()
+				TX_NUMBER += 1
+				nodeState[self][KNOWN_TXS].append(t)
+				addInvConns(self, self, [MSG_TX, t])
 
-		# Create block
-		if self in MINER_NODES and len(nodeState[self][KNOWN_TXS]) > minTxPerBlock:
-			b = generateBlock(self, nodeState[self][KNOWN_TXS])
-			REPEATED_BLOCK_COUNT[self].update({b[HEADER][1]:0})
-			BLOCK_NUMBER += 1
-			nodeState[self][KNOWN_TXS].clear()
-			nodeState[self][KNOWN_BLOCKS][b[HEADER][1]] = b
-			for n in nodeState[self][CONNS].keys():
-				sim.send(BLOCK, n, self, BLOCK_MSG, b)
-				nodeState[self][DISS_MSGS_SENT] += 1
+			# Create block
+			if self in MINER_NODES and len(nodeState[self][KNOWN_TXS]) > minTxPerBlock:
+				b = generateBlock(self, nodeState[self][KNOWN_TXS])
+				REPEATED_BLOCK_COUNT[self].update({b[HEADER][1]:0})
+				BLOCK_NUMBER += 1
+				nodeState[self][KNOWN_TXS].clear()
+				nodeState[self][KNOWN_BLOCKS][b[HEADER][1]] = b
+				for n in nodeState[self][CONNS].keys():
+					sim.send(BLOCK, n, self, BLOCK_MSG, b)
+					nodeState[self][DISS_MSGS_SENT] += 1
 
 	nodeState[self][CURRENT_CYCLE] += 1
 	nodeState[self][CURRENT_TIME] += nodeCycle
@@ -152,14 +151,15 @@ def join(self):
 	if len(NETWORK_NODES) < 2:
 		return
 
-	destNode = random.choice(NETWORK_NODES)
-	while destNode == self:
-		destNode = random.choice(NETWORK_NODES)
-
-	addConn(self, destNode)
-	sim.send(VERSION, destNode, self, VERSION_MSG)
-	sim.send(GETADDR, destNode, self, GETADDR_MSG)
-	nodeState[self][MEMB_MSGS_SENT] += 2
+	destNodes = random.choices(NETWORK_NODES, k=min(len(NETWORK_NODES)-1, 5))
+	while self in destNodes:
+		destNodes = random.choices(NETWORK_NODES, k=min(len(NETWORK_NODES)-1, 5))
+	
+	for destNode in destNodes:
+		addConn(self, destNode)
+		sim.send(VERSION, destNode, self, VERSION_MSG)
+		sim.send(GETADDR, destNode, self, GETADDR_MSG)
+		nodeState[self][MEMB_MSGS_SENT] += 2
 
 def lookup(self):
 	for n in nodeState[self][DB]:
@@ -265,6 +265,7 @@ def INV(self, source, msg, inv):
 				tmp.append(i)
 	if len(tmp) == 0:
 		return
+	print(tmp)
 	sim.send(GETDATA, source, self, GETDATA_MSG, tmp)
 	nodeState[self][DISS_MSGS_SENT] += 1
 
@@ -327,12 +328,14 @@ def GETDATA(self, source, msg, inv):
 
 	for i in inv:
 		if i[0] == MSG_TX:
+			rmInvConn(self, source, MSG_BLOCK, i[1])
 			sim.send(TX, source, self, TX_MSG, i[1])
 			nodeState[self][DISS_MSGS_SENT] += 1
 		elif i[0] == MSG_BLOCK:
 			b = nodeState[self][KNOWN_BLOCKS].get(i[1])
 			if b is None:
 				continue
+			rmInvConn(self, source, MSG_BLOCK, b[HEADER][1])
 			sim.send(BLOCK, source, self, BLOCK_MSG, b)
 			nodeState[self][DISS_MSGS_SENT] += 1
 
@@ -349,13 +352,11 @@ def BLOCK(self, source, msg, block):
 		REPEATED_BLOCK_COUNT[self].update({block[HEADER][1]:1})
 	else:
 		REPEATED_BLOCK_COUNT[self][block[HEADER][1]] += 1
-		return
 
 	if verifyBlocks(self, block):
 		if block[HEADER][1] not in nodeState[self][KNOWN_BLOCKS]:
 			nodeState[self][KNOWN_BLOCKS][block[HEADER][1]] = block
-			addInvConns(self, [MSG_BLOCK, block[HEADER][1]])
-		rmInvConn(self, source, MSG_BLOCK, block[HEADER][1])
+			addInvConns(self, source, [MSG_BLOCK, block[HEADER][1]])
 
 
 def TX(self, source, msg, tx):
@@ -368,8 +369,7 @@ def TX(self, source, msg, tx):
 	if verifyTxs(self, tx):
 		if tx not in nodeState[self][KNOWN_TXS]:
 			nodeState[self][KNOWN_TXS].append(tx)
-			addInvConns(self, [MSG_TX, tx])
-		rmInvConn(self, source, MSG_TX, tx)
+			addInvConns(self, source, [MSG_TX, tx])
 
 
 # Node functions
@@ -408,8 +408,10 @@ def addConn(self, node):
 def connsCount(self):
 	return len(nodeState[self][CONNS])
 
-def addInvConns(self, inv):
+def addInvConns(self, source, inv):
 	for n in nodeState[self][CONNS]:
+		if source == n:
+			continue
 		if inv not in nodeState[self][CONNS][n][QUEUED_INVS]:
 			nodeState[self][CONNS][n][QUEUED_INVS].append(inv)
 
@@ -419,7 +421,7 @@ def rmInvConn(self, node, type, hash):
 	for i in nodeState[self][CONNS][node][QUEUED_INVS]:
 		if type == i[0] and hash == i[1]:
 			nodeState[self][CONNS][node][QUEUED_INVS].remove(i)
-
+			
 def updateEntryPong(self, node, time):
 	nodeState[self][CONNS][node][LAST_PONG] = time
 
