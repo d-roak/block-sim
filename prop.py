@@ -522,7 +522,7 @@ def generateBlock(self, txs):
 
 	number = nodeState[self][BLOCKCHAIN][-1].getNumber() + 1
 	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][CURRENT_TIME])
-	body = (txs)
+	body = (txs.copy())
 	block = Block(number, header, body)
 	return block
 

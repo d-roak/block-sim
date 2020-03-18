@@ -1,7 +1,7 @@
 # system settings, mandatory
-nbNodes : 200
+nbNodes : 500
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100000
 # duration of node cycle
 NODE_CYCLE: 1250
 # node cycle drift, zero means perfect clocks 
@@ -40,4 +40,4 @@ miners: 5
 # 10min = 10 * 60 * 1000 = 600 000 ms
 # 10min / NODE_CYCLE = nbCycles = 480
 # minTxPerBlock = nbCycles * txPerCycle = 960
-minTxPerBlock: 460
+minTxPerBlock: 960

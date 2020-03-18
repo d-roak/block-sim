@@ -23,7 +23,8 @@ INV_MSG, GETHEADERS_MSG, HEADERS_MSG, GETBLOCKS_MSG, GETDATA_MSG, BLOCK_MSG, TX_
 "INV", "GETHEADERS", "HEADERS", "GETBLOCKS", "GETDATA", "BLOCK", "TX"
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, CONNS, \
-DB, RELAY_NODES, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11, 12, 13
+DB, RELAY_NODES, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, QUEUED_TXS, KNOWN_BLOCKS, QUEUED_BLOCKS \
+= 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11, 12, 13, 14, 15
 
 # Conns
 LAST_PONG, QUEUED_INVS = 0, 1
@@ -62,13 +63,13 @@ def improve_performance():
 def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
 
-	if self == 0 and nodeState[self][CURRENT_CYCLE] % 500 == 0:
+	if self == 0 and nodeState[self][CURRENT_CYCLE] % 250 == 0:
 		value = datetime.datetime.fromtimestamp(time.time())
 		logger.info('time: {} node: {} cycle: {}'.format(value.strftime('%Y-%m-%d %H:%M:%S'), self, nodeState[self][CURRENT_CYCLE]))
 		print("Time:", value.strftime('%Y-%m-%d %H:%M:%S'))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
 		print("Queued events: ", sim.getNumberEvents())
-		improve_performance()
+		#improve_performance()
 
 	if self not in nodeState:
 		return
@@ -112,10 +113,10 @@ def CYCLE(self):
 				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], block):
 					nodeState[self][BLOCKCHAIN_HASHES][block[HEADER][1]] = block
 					# Remove known txs that are already in blocks
-					txs = list(block[BODY])
+					txs = block[BODY]
 					for t in txs:
-						if t in nodeState[self][KNOWN_TXS]:
-							nodeState[self][KNOWN_TXS].remove(t)
+						if t in nodeState[self][QUEUED_TXS]:
+							nodeState[self][QUEUED_TXS].remove(t)
 				addBlockToBlockchain(REAL_BLOCKCHAIN, block)
 
 		# Stop creating blocks/txs at 90% of cycles
@@ -124,16 +125,17 @@ def CYCLE(self):
 			if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
 				t = hashlib.sha1(str(TX_NUMBER).encode('utf-8')).hexdigest()
 				TX_NUMBER += 1
-				nodeState[self][KNOWN_TXS].append(t)
+				nodeState[self][QUEUED_TXS].append(t)
 				addInvConns(self, self, [MSG_TX, t])
 
 			# Create block
-			if self in MINER_NODES and len(nodeState[self][KNOWN_TXS]) > minTxPerBlock:
-				b = generateBlock(self, nodeState[self][KNOWN_TXS])
+			if self in MINER_NODES and len(nodeState[self][QUEUED_TXS]) > minTxPerBlock:
+				b = generateBlock(self, nodeState[self][QUEUED_TXS])
 				REPEATED_BLOCK_COUNT[self].update({b[HEADER][1]:0})
 				BLOCK_NUMBER += 1
-				nodeState[self][KNOWN_TXS].clear()
+				nodeState[self][QUEUED_TXS].clear()
 				nodeState[self][KNOWN_BLOCKS][b[HEADER][1]] = b
+				nodeState[self][QUEUED_BLOCKS].append(b)
 				for n in nodeState[self][CONNS].keys():
 					sim.send(BLOCK, n, self, BLOCK_MSG, b)
 					nodeState[self][DISS_MSGS_SENT] += 1
@@ -265,7 +267,6 @@ def INV(self, source, msg, inv):
 				tmp.append(i)
 	if len(tmp) == 0:
 		return
-	print(tmp)
 	sim.send(GETDATA, source, self, GETDATA_MSG, tmp)
 	nodeState[self][DISS_MSGS_SENT] += 1
 
@@ -356,6 +357,7 @@ def BLOCK(self, source, msg, block):
 	if verifyBlocks(self, block):
 		if block[HEADER][1] not in nodeState[self][KNOWN_BLOCKS]:
 			nodeState[self][KNOWN_BLOCKS][block[HEADER][1]] = block
+			nodeState[self][QUEUED_BLOCKS].append(block)
 			addInvConns(self, source, [MSG_BLOCK, block[HEADER][1]])
 
 
@@ -369,6 +371,7 @@ def TX(self, source, msg, tx):
 	if verifyTxs(self, tx):
 		if tx not in nodeState[self][KNOWN_TXS]:
 			nodeState[self][KNOWN_TXS].append(tx)
+			nodeState[self][QUEUED_TXS].append(tx)
 			addInvConns(self, source, [MSG_TX, tx])
 
 
@@ -390,7 +393,7 @@ def createNode(id):
 	# KNOWN_TXS				# private
 	# KNOWN_BLOCKS			# private
 
-	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], dict(), [], dict()]
+	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], dict(), [], [], dict(), []]
 
 	return node
 
@@ -456,13 +459,31 @@ def generateBlock(self, txs):
 	# Header (prev_hash, hash, timestamp)
 	# Body (txs)
 
-	header = (nodeState[self][BLOCKCHAIN][-1][HEADER][0], BLOCK_NUMBER, nodeState[self][CURRENT_TIME])
+	header = (nodeState[self][BLOCKCHAIN][-1][HEADER][1], BLOCK_NUMBER, nodeState[self][CURRENT_TIME])
 	BLOCK_NUMBER += 1
-	body = txs
+	body = txs.copy()
 	block = (header, body)
 	return block
 
 def addBlockToBlockchain(blockchain, block):
+	# Used for local blockchains and real blockchain
+	for b in blockchain:
+		if b[HEADER][1] == block[HEADER][1]:
+			return False
+			
+	b = blockchain[-1]
+	# Confirm prev_hash
+	if b[HEADER][1] == block[HEADER][0]:
+		# Confirm timestamp
+		if block[HEADER][2] < b[HEADER][2]:
+			return False
+		else:		
+			blockchain.append(block)
+			return True
+	
+	return False
+
+def addBlockToBlockchain2(blockchain, block):
 	# Used for local blockchains and real blockchain
 	
 	for b in blockchain:

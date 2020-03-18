@@ -1,8 +1,8 @@
 # system settings, mandatory
 #bitcoin/ethereum less than 8000/10000
-nbNodes : 200
+nbNodes : 500
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100000
 # duration of node cycle
 NODE_CYCLE: 1250
 # node cycle drift, zero means perfect clocks 
@@ -43,4 +43,4 @@ lookupTimeout: 1000
 maxBlockHeaders: 100
 txPerCycle: 2
 miners: 5
-minTxPerBlock: 460
+minTxPerBlock: 960
