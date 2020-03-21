@@ -14,6 +14,7 @@ import merkletools
 import statistics
 import hashlib
 import time
+import datetime
 
 from sim import sim
 import utils
@@ -25,8 +26,8 @@ STATUS_MSG, ANNOUNCEMENT_MSG, GETDATA_MSG, BLOCK_MSG, TXS_MSG, GRAFT_MSG, PRUNE_
 "STATUS", "ANNOUNCEMENT", "GETDATA", "BLOCK", "TRANSACTIONS", "GRAFT", "PRUNE"
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, ID_SHA, DB, NEIGHBS, \
-BTREE, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, QUEUED_TXS, QUEUED_BLOCKS, QUEUED_ANN, SENT_STATUS = \
-0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+BTREE, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, KNOWN_BLOCKS, QUEUED_TXS, QUEUED_BLOCKS, QUEUED_ANN, MISSING_ANN, ASKED_ANN, SENT_STATUS = \
+0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
 
 EAGER, LAZY = 0, 1
 
@@ -59,12 +60,14 @@ def improve_performance():
 
 def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
-
-	if self == 0:
-		logger.info('node: {} cycle: {}'.format(self, nodeState[self][CURRENT_CYCLE]))
+	
+	if self == 0 and nodeState[self][CURRENT_CYCLE] % 500 == 0:
+		value = datetime.datetime.fromtimestamp(time.time())
+		logger.info('time: {} node: {} cycle: {}'.format(value.strftime('%Y-%m-%d %H:%M:%S'), self, nodeState[self][CURRENT_CYCLE]))
+		print("Time:", value.strftime('%Y-%m-%d %H:%M:%S'))
 		print("Cycle: ", nodeState[self][CURRENT_CYCLE], "/", nbCycles-1)
-		print("Events: ", sim.getNumberEvents())
-		#improve_performance()
+		print("Queued events: ", sim.getNumberEvents())
+		improve_performance()
 
 	if self not in nodeState:
 		return
@@ -88,6 +91,8 @@ def CYCLE(self):
 			for n in nodeState[self][NEIGHBS]:
 				sim.send(NEIGHBORS, n, self, NEIGHBORS_MSG, [self])
 				nodeState[self][MEMB_MSGS_SENT] += 1
+		if nodeState[self][CURRENT_TIME] % 360000 == 0:
+			improve(self)
 
 		# lifecheck and cycle ping
 		lifeCheckDBNeighbs(self)
@@ -98,8 +103,6 @@ def CYCLE(self):
 		# lookup for new neighbors
 		if neighbsSize(self) < neighbThreshold:
 			lookup(self)
-		
-		improve(self)
 
 		# Message dissemination		
 		# Blockchain maintenance
@@ -118,11 +121,39 @@ def CYCLE(self):
 		nodeState[self][QUEUED_BLOCKS].clear()
 
 		# Lazy push
-		if nodeState[self][CURRENT_TIME] % 2500 == 0 and nodeState[self][QUEUED_ANN]:
+		if nodeState[self][CURRENT_TIME] % 12500 == 0 and nodeState[self][QUEUED_ANN]:
 			for n in nodeState[self][BTREE][LAZY]:
 				sim.send(ANNOUNCEMENT, n, self, ANNOUNCEMENT_MSG, nodeState[self][QUEUED_ANN])
 				nodeState[self][DISS_MSGS_SENT] += 1
 			nodeState[self][QUEUED_ANN].clear()
+
+		# Handle missing messages timeouts
+		for a in nodeState[self][MISSING_ANN].copy().keys():
+			if a not in nodeState[self][ASKED_ANN]:
+				ask = True
+			elif nodeState[self][CURRENT_TIME] >= nodeState[self][ASKED_ANN][a]:
+				ask = True
+			else:
+				ask = False
+			if ask:
+				if len(nodeState[self][MISSING_ANN][a]) == 0:
+					del nodeState[self][MISSING_ANN][a]
+					continue
+				t = a[0]
+				h = a[1]
+				source = nodeState[self][MISSING_ANN][a].pop(0)
+				if t == ANN_BLOCK and h not in nodeState[self][KNOWN_BLOCKS]:
+					nodeState[self][ASKED_ANN][a] = nodeState[self][CURRENT_TIME] + 1250
+					graftBTree(self, source)
+					sim.send(GRAFT, source, self, GRAFT_MSG)
+					sim.send(GETDATA, source, self, GETDATA_MSG, ANN_BLOCK, [h])
+					nodeState[self][DISS_MSGS_SENT] += 2
+				elif t == ANN_TX and h not in nodeState[self][KNOWN_TXS]:
+					nodeState[self][ASKED_ANN][a] = nodeState[self][CURRENT_TIME] + 1250
+					graftBTree(self, source)
+					sim.send(GRAFT, source, self, GRAFT_MSG)
+					sim.send(GETDATA, source, self, GETDATA_MSG, ANN_TX, [h])
+					nodeState[self][DISS_MSGS_SENT] += 2
 
 		# Create block & Txs
 		# Stop creating blocks and txs at 90% of cycles
@@ -140,8 +171,7 @@ def CYCLE(self):
 			if len(nodeState[self][QUEUED_TXS]) > minTxPerBlock and self in MINER_NODES:
 				b = generateBlock(self, nodeState[self][QUEUED_TXS])
 				REPEATED_BLOCK_COUNT[self].update({b.getHash():0})
-				BLOCK_NUMBER += 1				
-				nodeState[self][QUEUED_TXS].clear()
+				BLOCK_NUMBER += 1
 				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 				nodeState[self][QUEUED_BLOCKS].append(b)
 				for n in nodeState[self][BTREE][EAGER]:
@@ -168,6 +198,7 @@ def join(self):
 	for destNode in destNodes:
 		addEntryDB(self, destNode)
 		addEntryNeighbs(self, destNode)
+		graftBTree(self, destNode)
 		sim.send(FINDNODE, destNode, self, FINDNODE_MSG)
 		nodeState[self][SENT_STATUS].append(destNode)
 		sim.send(STATUS, destNode, self, STATUS_MSG, nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][BLOCKCHAIN][-1].getNumber())
@@ -180,7 +211,7 @@ def lookup(self):
 		nodeState[self][MEMB_MSGS_SENT] += 1
 
 def improve(self):
-	for n in nodeState[self][DB].copy():
+	for n in random.sample(list(nodeState[self][DB].copy()), k=min(len(nodeState[self][DB]), 5)):
 		addEntryNeighbs(self, n)
 
 
@@ -235,7 +266,7 @@ def NEIGHBORS(self, source, msg, nodes):
 	for n in nodes:
 		if self == n:
 			continue
-		addEntryDB(self, source)
+		addEntryDB(self, n)
 		addEntryNeighbs(self, n)
 
 
@@ -256,25 +287,20 @@ def STATUS(self, source, msg, bestHash, blockNum):
 		nodeState[self][DISS_MSGS_SENT] += 1
 
 def ANNOUNCEMENT(self, source, msg, anns):
-	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
+	#logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
-	tmp_block = []
-	tmp_tx = []
 	for a in anns:
 		t = a[0]
 		h = a[1]
 		if t == ANN_BLOCK and h not in nodeState[self][KNOWN_BLOCKS]:
-			tmp_block.append(h)
+			if a not in nodeState[self][MISSING_ANN]:
+				nodeState[self][MISSING_ANN][a] = []
+			nodeState[self][MISSING_ANN][a].append(source)
 		elif t == ANN_TX and h not in nodeState[self][KNOWN_TXS]:
-			tmp_tx.append(h)
-	
-	if tmp_block:
-		sim.send(GETDATA, source, self, ANN_BLOCK, GETDATA_MSG, tmp_block)
-		nodeState[self][DISS_MSGS_SENT] += 1
-	elif tmp_tx:
-		sim.send(GETDATA, source, self, ANN_TX, GETDATA_MSG, tmp_tx)
-		nodeState[self][DISS_MSGS_SENT] += 1
+			if a not in nodeState[self][MISSING_ANN]:
+				nodeState[self][MISSING_ANN][a] = []
+			nodeState[self][MISSING_ANN][a].append(source)
 
 def GETDATA(self, source, msg, type, hashes, sync=False):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
@@ -288,7 +314,6 @@ def GETDATA(self, source, msg, type, hashes, sync=False):
 				retrieve.append(nodeState[self][BLOCKCHAIN][b_index - i].getHeader())
 		else:
 			retrieve = list(hashes)
-
 		for h in retrieve:
 			if h in nodeState[self][KNOWN_BLOCKS]:
 				sim.send(BLOCK, source, self, BLOCK_MSG, nodeState[self][KNOWN_BLOCKS][h])
@@ -310,10 +335,17 @@ def BLOCK(self, source, msg, block):
 		REPEATED_BLOCK_COUNT[self][block.getHash()] += 1
 
 	if block.getHash() not in nodeState[self][KNOWN_BLOCKS]:
+		# Remove from missing/asked
+		a = (ANN_BLOCK, block.getHash())
+		if a in nodeState[self][MISSING_ANN]:
+			del nodeState[self][MISSING_ANN][a]
+			if a in nodeState[self][ASKED_ANN]:
+				del nodeState[self][ASKED_ANN][a]
+
 		nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
 		nodeState[self][QUEUED_BLOCKS].append(block)
-		
-		eagerList = list(nodeState[self][BTREE][EAGER])
+
+		eagerList = nodeState[self][BTREE][EAGER].copy()
 		if source in eagerList:
 			eagerList.remove(source)
 		else:
@@ -324,17 +356,25 @@ def BLOCK(self, source, msg, block):
 		nodeState[self][QUEUED_ANN].append((ANN_BLOCK, block.getHash()))
 	else:
 		pruneBTree(self, source)
-
+		sim.send(PRUNE, source, self, PRUNE_MSG)
+		nodeState[self][DISS_MSGS_SENT] += 1
 
 def TXS(self, source, msg, tx):
-	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
+	#logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	if tx.getHash() not in nodeState[self][KNOWN_TXS]:
+		# Remove from missing/asked
+		a = (ANN_TX, tx.getHash())
+		if a in nodeState[self][MISSING_ANN]:
+			del nodeState[self][MISSING_ANN][a]
+			if a in nodeState[self][ASKED_ANN]:
+				del nodeState[self][ASKED_ANN][a]
+
 		nodeState[self][KNOWN_TXS][tx.getHash()] = tx
 		nodeState[self][QUEUED_TXS].append(tx)
-		
-		eagerList = list(nodeState[self][BTREE][EAGER])
+
+		eagerList = nodeState[self][BTREE][EAGER].copy()
 		if source in eagerList:
 			eagerList.remove(source)
 		else:
@@ -343,8 +383,10 @@ def TXS(self, source, msg, tx):
 			sim.send(TXS, n, self, TXS_MSG, tx)
 			nodeState[self][DISS_MSGS_SENT] += 1
 		nodeState[self][QUEUED_ANN].append((ANN_TX, tx.getHash()))
-	else:
+	elif tx.getNumber() % 100 == 0:
 		pruneBTree(self, source)
+		sim.send(PRUNE, source, self, PRUNE_MSG)
+		nodeState[self][DISS_MSGS_SENT] += 1
 
 
 def GRAFT(self, source, msg):
@@ -352,14 +394,14 @@ def GRAFT(self, source, msg):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	addEntryDB(self, source)
-	graftBTree(self, source, message=False)
+	graftBTree(self, source)
 
 def PRUNE(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	addEntryDB(self, source)
-	pruneBTree(self, source, message=False)
+	pruneBTree(self, source)
 
 
 # Node functions
@@ -382,9 +424,11 @@ def createNode(id):
 	# QUEUED_TXS			# private
 	# QUEUED_BLOCKS			# private
 	# QUEUED_ANN			# private
+	# MISSING_ANN			# private (ann, sender)
+	# ASKED_ANN				# private (ann, timeout)
 	# SENT_STATUS			# private
 
-	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), ([], []), [], dict(), dict(), dict(), [], [], [], []]
+	return [0, 0, 0, 0, 0, 0, id, hashlib.sha256(str(id).encode('utf-8')).hexdigest(), dict(), dict(), ([], []), [], dict(), dict(), dict(), [], [], [], dict(), dict(), []]
 
 
 # DB (not persistent)
@@ -414,7 +458,7 @@ def addEntryNeighbs(self, node):
 	
 	if neighbsSize(self) < tableSize:
 		nodeState[self][NEIGHBS][node] = 0
-		graftBTree(self, node)
+		addLazyBTree(self, node)
 		return True
 
 	worst = node
@@ -426,6 +470,7 @@ def addEntryNeighbs(self, node):
 
 	if worst != node:
 		replaceEntryNeighbs(self, node, worst)
+		addLazyBTree(self, node)
 		return True
 	return False
 
@@ -446,7 +491,6 @@ def replaceEntryNeighbs(self, node, rmnode):
 	addEntryDB(self, rmnode)
 	removeEntryNeighbs(self, rmnode)
 	nodeState[self][NEIGHBS][node] = 0
-	graftBTree(self, node)
 
 def lifeCheckDBNeighbs(self):
 	# if the last pong received is older than 1 day (24h = 86400s), that node will be removed from the db
@@ -463,24 +507,24 @@ def lifeCheckDBNeighbs(self):
 
 # Helpers
 
-def graftBTree(self, grafted, message=True):
+def graftBTree(self, grafted):
 	if grafted in nodeState[self][BTREE][LAZY]: 
 		nodeState[self][BTREE][LAZY].remove(grafted)
 	if grafted not in nodeState[self][BTREE][EAGER]:
 		nodeState[self][BTREE][EAGER].append(grafted)
-		if message:
-			sim.send(GRAFT, grafted, self, GRAFT_MSG)
-			nodeState[self][DISS_MSGS_SENT] += 1
 
 
-def pruneBTree(self, pruned, message=True):
+def pruneBTree(self, pruned):
 	if pruned in nodeState[self][BTREE][EAGER]:
 		nodeState[self][BTREE][EAGER].remove(pruned)
-		if message:
-			sim.send(PRUNE, pruned, self, PRUNE_MSG)
-			nodeState[self][DISS_MSGS_SENT] += 1
 	if pruned not in nodeState[self][BTREE][LAZY]:
 		nodeState[self][BTREE][LAZY].append(pruned)
+
+
+def addLazyBTree(self, n):
+	if n not in nodeState[self][BTREE][EAGER]\
+	and n not in nodeState[self][BTREE][LAZY]:
+		nodeState[self][BTREE][LAZY].append(n)
 
 
 def lookupNeighbors(self):
@@ -629,6 +673,9 @@ class Tx:
 	def getHash(self):
 		return self.hash
 
+	def getNumber(self):
+		return self.n
+
 
 def wrapup(dir):
 	logger.info("Wrapping up")
@@ -711,9 +758,9 @@ def wrapup(dir):
 			"known_blocks": len(list(nodeState[n][KNOWN_BLOCKS].keys())),
 			#"known_txs": list(nodeState[n][KNOWN_TXS].keys()),
 			#"db": db,
-			"neighbs": neighbs,
-			"eager_view": nodeState[n][BTREE][EAGER],
-			"lazy_view": nodeState[n][BTREE][LAZY]
+			"neighbs_len": len(neighbs),
+			"eager_view_len": len(nodeState[n][BTREE][EAGER]),
+			"lazy_view_len": len(nodeState[n][BTREE][LAZY])
 		})
 
 	for n in conns_bound:

@@ -1,8 +1,8 @@
 # system settings, mandatory
 #bitcoin/ethereum less than 8000/10000
-nbNodes : 200
+nbNodes : 500
 # number of simulation cycles
-nbCycles : 1000
+nbCycles : 100000
 # duration of node cycle
 NODE_CYCLE: 1250
 # node cycle drift, zero means perfect clocks 
@@ -29,11 +29,8 @@ randomSeed: -1
 #randomSeed: 123456789
 probJoin: 1
 
-# protocol specific
-probLookup: 0.0
-
 #plumtree
-fanout: 0.2
+fanout: 3
 
 # TODO change for high number of nodes
 tableSize: 20
@@ -44,4 +41,4 @@ neighbThreshold: 5
 txPerCycle: 2
 miners: 5
 #minTxPerBlock: 400
-minTxPerBlock: 460
+minTxPerBlock: 960
