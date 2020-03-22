@@ -23,8 +23,8 @@ INV_MSG, GETHEADERS_MSG, HEADERS_MSG, GETBLOCKS_MSG, GETDATA_MSG, BLOCK_MSG, TX_
 "INV", "GETHEADERS", "HEADERS", "GETBLOCKS", "GETDATA", "BLOCK", "TX"
 
 CURRENT_CYCLE, CURRENT_TIME, MEMB_MSGS_RECEIVED, MEMB_MSGS_SENT, DISS_MSGS_RECEIVED, DISS_MSGS_SENT, ID, CONNS, \
-DB, RELAY_NODES, BLOCKCHAIN, BLOCKCHAIN_HASHES, KNOWN_TXS, QUEUED_TXS, KNOWN_BLOCKS, QUEUED_BLOCKS \
-= 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11, 12, 13, 14, 15
+DB, RELAY_NODES, BLOCKCHAIN, KNOWN_TXS, QUEUED_TXS, KNOWN_BLOCKS, QUEUED_BLOCKS \
+= 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 , 11, 12, 13, 14
 
 # Conns
 LAST_PONG, QUEUED_INVS = 0, 1
@@ -35,7 +35,6 @@ MSG_TX, MSG_BLOCK = 0, 1
 # used only to check if the node is already in the network (simulator)
 # nodes don't have an overview of the network
 NETWORK_NODES = []
-NEXT_ADDR = {}
 MINER_NODES = []
 TX_NODES = []
 REAL_BLOCKCHAIN = []
@@ -48,7 +47,6 @@ def init():
 
 	for nodeId in nodeState:
 		REPEATED_BLOCK_COUNT.append({})
-		NEXT_ADDR[nodeId] = 0
 		sim.schedulleExecution(CYCLE, nodeId)
 
 def improve_performance():
@@ -105,16 +103,15 @@ def CYCLE(self):
 				nodeState[self][DISS_MSGS_SENT] += 1
 				nodeState[self][CONNS][n][QUEUED_INVS].clear()
 
-		for block in nodeState[self][KNOWN_BLOCKS].values():
-			if block.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
-				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], block):
-					nodeState[self][BLOCKCHAIN_HASHES][block.getHash()] = block
-					# Remove known txs that are already in blocks
-					txs = list(block.getBody())
-					for t in txs:
-						if t in nodeState[self][QUEUED_TXS]:
-							nodeState[self][QUEUED_TXS].remove(t)
-				addBlockToBlockchain(REAL_BLOCKCHAIN, block)
+		for block in nodeState[self][QUEUED_BLOCKS]:
+			if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], block):
+				# Remove known txs that are already in blocks
+				txs = list(block.getBody())
+				for t in txs:
+					if t in nodeState[self][QUEUED_TXS]:
+						nodeState[self][QUEUED_TXS].remove(t)
+			if addBlockToBlockchain(REAL_BLOCKCHAIN, block):
+				cleanupTxs(block.getBody())
 
 		# Stop creating blocks/txs at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
@@ -142,6 +139,12 @@ def CYCLE(self):
 	if nodeState[self][CURRENT_CYCLE] < nbCycles:
 		sim.schedulleExecution(CYCLE, self)
 
+
+def cleanupTxs(txs):
+	for i in nodeState:
+		for t in nodeState[i][KNOWN_TXS]:
+			if t in txs:
+				nodeState[i][KNOWN_TXS].remove(t)
 
 def join(self):
 	if self not in NETWORK_NODES:
@@ -244,6 +247,7 @@ def ADDR(self, source, msg, addrs):
 		addConn(self, n)
 		sim.send(VERSION, n, self, VERSION_MSG)
 		nodeState[self][MEMB_MSGS_SENT] += 1
+	del temp
 
 # Message Dissemination Messages
 
@@ -288,6 +292,7 @@ def GETHEADERS(self, source, msg, start, end):
 			continue
 
 	sim.send(HEADERS, source, self, HEADERS_MSG, tmp)
+	del tmp
 	nodeState[self][DISS_MSGS_SENT] += 1
 
 
@@ -316,6 +321,7 @@ def GETBLOCKS(self, source, msg, headers):
 	if len(tmp) > 0:
 		sim.send(INV, source, self, INV_MSG, tmp)
 		nodeState[self][DISS_MSGS_SENT] += 1
+	del tmp
 
 
 def GETDATA(self, source, msg, inv):
@@ -384,13 +390,14 @@ def createNode(id):
 	# ID					# public
 	# CONNS					# private
 	# DB					# private
-	# RELAY_NODEs			# private
+	# RELAY_NODES			# private
 	# BLOCKCHAIN			# private
-	# BLOCKCHAIN_HASHES		# private
 	# KNOWN_TXS				# private
+	# QUEUED_TXS
 	# KNOWN_BLOCKS			# private
-
-	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], dict(), [], [], dict(), []]
+	# QUEUED_BLOCKS
+	
+	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], [], [], dict(), []]
 
 	return node
 
@@ -639,7 +646,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b.getHash() not in nodeState[n][BLOCKCHAIN_HASHES] and b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
+			if b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -757,7 +764,6 @@ def configure(config):
 		nodeState[n] = createNode(n)
 		nodeState[n][KNOWN_BLOCKS][genesisBlock.getHash()] = genesisBlock
 		nodeState[n][BLOCKCHAIN].append(genesisBlock)
-		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock.getHash()] = genesisBlock
 
 	for i in random.sample(range(nbNodes), miners):
 		MINER_NODES.append(i)
