@@ -32,9 +32,6 @@ LAST_PONG, QUEUED_INVS = 0, 1
 # Inventory types
 MSG_TX, MSG_BLOCK = 0, 1
 
-# Block
-HEADER, BODY = 0, 1
-
 # used only to check if the node is already in the network (simulator)
 # nodes don't have an overview of the network
 NETWORK_NODES = []
@@ -109,11 +106,11 @@ def CYCLE(self):
 				nodeState[self][CONNS][n][QUEUED_INVS].clear()
 
 		for block in nodeState[self][KNOWN_BLOCKS].values():
-			if block[HEADER][1] not in nodeState[self][BLOCKCHAIN_HASHES]:
+			if block.getHash() not in nodeState[self][BLOCKCHAIN_HASHES]:
 				if addBlockToBlockchain(nodeState[self][BLOCKCHAIN], block):
-					nodeState[self][BLOCKCHAIN_HASHES][block[HEADER][1]] = block
+					nodeState[self][BLOCKCHAIN_HASHES][block.getHash()] = block
 					# Remove known txs that are already in blocks
-					txs = block[BODY]
+					txs = list(block.getBody())
 					for t in txs:
 						if t in nodeState[self][QUEUED_TXS]:
 							nodeState[self][QUEUED_TXS].remove(t)
@@ -131,10 +128,10 @@ def CYCLE(self):
 			# Create block
 			if self in MINER_NODES and len(nodeState[self][QUEUED_TXS]) > minTxPerBlock:
 				b = generateBlock(self, nodeState[self][QUEUED_TXS])
-				REPEATED_BLOCK_COUNT[self].update({b[HEADER][1]:0})
+				REPEATED_BLOCK_COUNT[self].update({b.getHash():0})
 				BLOCK_NUMBER += 1
 				nodeState[self][QUEUED_TXS].clear()
-				nodeState[self][KNOWN_BLOCKS][b[HEADER][1]] = b
+				nodeState[self][KNOWN_BLOCKS][b.getHash()] = b
 				nodeState[self][QUEUED_BLOCKS].append(b)
 				for n in nodeState[self][CONNS].keys():
 					sim.send(BLOCK, n, self, BLOCK_MSG, b)
@@ -220,7 +217,7 @@ def VERACK(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][MEMB_MSGS_RECEIVED] += 1
 
-	sim.send(GETHEADERS, source, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0][HEADER][1], 0)
+	sim.send(GETHEADERS, source, self, GETHEADERS_MSG, nodeState[self][BLOCKCHAIN][0].getHash(), 0)
 	nodeState[self][DISS_MSGS_SENT] += 1
 
 
@@ -280,12 +277,12 @@ def GETHEADERS(self, source, msg, start, end):
 	tmp = []
 	started = False
 	for b in nodeState[self][BLOCKCHAIN]:
-		if b[HEADER][1] == end:
-			tmp.append(b[HEADER])
+		if b.getHash() == end:
+			tmp.append(b.getHeader())
 			break
 		if started:
-			tmp.append(b[HEADER])
-		elif not started and b[HEADER][1] == start:
+			tmp.append(b.getHeader())
+		elif not started and b.getHash() == start:
 			started = True
 		else:
 			continue
@@ -313,8 +310,8 @@ def GETBLOCKS(self, source, msg, headers):
 
 	tmp = []
 	for b in nodeState[self][BLOCKCHAIN]:
-		if b[HEADER] in headers:
-			tmp.append([MSG_BLOCK, b[HEADER][1]])
+		if b.getHeader() in headers:
+			tmp.append([MSG_BLOCK, b.getHash()])
 	
 	if len(tmp) > 0:
 		sim.send(INV, source, self, INV_MSG, tmp)
@@ -336,7 +333,7 @@ def GETDATA(self, source, msg, inv):
 			b = nodeState[self][KNOWN_BLOCKS].get(i[1])
 			if b is None:
 				continue
-			rmInvConn(self, source, MSG_BLOCK, b[HEADER][1])
+			rmInvConn(self, source, MSG_BLOCK, b.getHash())
 			sim.send(BLOCK, source, self, BLOCK_MSG, b)
 			nodeState[self][DISS_MSGS_SENT] += 1
 
@@ -349,16 +346,16 @@ def BLOCK(self, source, msg, block):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 	
-	if block[HEADER][1] not in REPEATED_BLOCK_COUNT[self]:
-		REPEATED_BLOCK_COUNT[self].update({block[HEADER][1]:1})
+	if block.getHash() not in REPEATED_BLOCK_COUNT[self]:
+		REPEATED_BLOCK_COUNT[self].update({block.getHash():1})
 	else:
-		REPEATED_BLOCK_COUNT[self][block[HEADER][1]] += 1
+		REPEATED_BLOCK_COUNT[self][block.getHash()] += 1
 
 	if verifyBlocks(self, block):
-		if block[HEADER][1] not in nodeState[self][KNOWN_BLOCKS]:
-			nodeState[self][KNOWN_BLOCKS][block[HEADER][1]] = block
+		if block.getHash() not in nodeState[self][KNOWN_BLOCKS]:
+			nodeState[self][KNOWN_BLOCKS][block.getHash()] = block
 			nodeState[self][QUEUED_BLOCKS].append(block)
-			addInvConns(self, source, [MSG_BLOCK, block[HEADER][1]])
+			addInvConns(self, source, [MSG_BLOCK, block.getHash()])
 
 
 def TX(self, source, msg, tx):
@@ -448,34 +445,39 @@ def lifeCheckDBNeighbs(self):
 # Blockchain methods
 def generateGenesisBlock():
 	global BLOCK_NUMBER
-	header = (0, BLOCK_NUMBER, 0)
+	header = ("0", 0)
 	BLOCK_NUMBER += 1
-	body = []
-	return (header, body)
+	body = ([])
+	block = Block(0, header, body)
+	return block
 
 def generateBlock(self, txs):
-	global BLOCK_NUMBER
 	# Simplified version without extra stuff
-	# Header (prev_hash, hash, timestamp)
-	# Body (txs)
+	# Header (prev_hash, merkle_root, timestamp)
+	# Body (merkle_proof(0), txs)
 
-	header = (nodeState[self][BLOCKCHAIN][-1][HEADER][1], BLOCK_NUMBER, nodeState[self][CURRENT_TIME])
-	BLOCK_NUMBER += 1
-	body = txs.copy()
-	block = (header, body)
+	number = nodeState[self][BLOCKCHAIN][-1].getNumber() + 1
+	header = (nodeState[self][BLOCKCHAIN][-1].getHash(), nodeState[self][CURRENT_TIME])
+	body = (txs.copy())
+	block = Block(number, header, body)
 	return block
+
+def generateTx(n):
+	return Tx(n)
 
 def addBlockToBlockchain(blockchain, block):
 	# Used for local blockchains and real blockchain
 	for b in blockchain:
-		if b[HEADER][1] == block[HEADER][1]:
+		if b.getHash() == block.getHash():
 			return False
-			
+
 	b = blockchain[-1]
 	# Confirm prev_hash
-	if b[HEADER][1] == block[HEADER][0]:
+	if b.getHash() == block.getHeader()[0]:
 		# Confirm timestamp
-		if block[HEADER][2] < b[HEADER][2]:
+		if block.getHeader()[1] < b.getHeader()[1]:
+			return False
+		elif block.getNumber() < b.getNumber():
 			return False
 		else:		
 			blockchain.append(block)
@@ -485,19 +487,21 @@ def addBlockToBlockchain(blockchain, block):
 
 def addBlockToBlockchain2(blockchain, block):
 	# Used for local blockchains and real blockchain
-	
 	for b in blockchain:
-		if b[HEADER][1] == block[HEADER][1]:
+		if b.getHash() == block.getHash():
 			return False
+
 	for i, b in enumerate(blockchain):
 		# Confirm prev_hash
-		if b[HEADER][1] == block[HEADER][0]:
+		if b.getHash() == block.getHeader()[0]:
 			# Confirm timestamp
-			if block[HEADER][2] < b[HEADER][2]:
+			if block.getHeader()[1] < b.getHeader()[1]:
+				return False
+			elif block.getNumber() < b.getNumber():
 				return False
 			# Check if there are more blocks in chain
-			elif blockchain[-1][HEADER][1] != b[HEADER][1]:
-				if blockchain[i + 1][HEADER][2] > block[HEADER][2]:
+			elif blockchain[-1].getHash() != b.getHash():
+				if blockchain[i + 1].getHeader()[1] > block.getHeader()[1]:
 					del blockchain[i+1:]
 					blockchain.append(block)
 					return True
@@ -520,6 +524,73 @@ def verifyBlocks(self, blocks):
 def verifyTxs(self, txs):
 	return True
 
+
+# Block definition
+class Block:
+	def __init__(self, n, header, body):
+		# Simplified version without extra stuff
+		# Header (prev_hash, merkle_root, timestamp)
+		# Body (merkle_proof(0), txs)
+		self.n = n
+		self.header = header
+		self.body = body
+		#sha256(prev_hash, merkle_root, timestamp)
+		h = hashlib.sha256()
+		h.update(self.header[0].encode('utf-8'))
+		h.update(str(self.header[1]).encode('utf-8'))
+		self.hash = h.hexdigest()
+
+	def __cmp__(self, other):
+		if self.n == other.n:
+			return 0
+		elif self.n < other.n:
+			return -1
+		else:
+			return 1
+
+	def __eq__(self, other):
+		return self.__cmp__(other) == 0
+	def __lt__(self, other):
+		return self.__cmp__(other) < 0
+	def __gt__(self, other):
+		return self.__cmp__(other) > 0
+
+	def getNumber(self):
+		return self.n
+
+	def getHeader(self):
+		return self.header
+
+	def getHash(self):
+		return self.hash
+
+	def getBody(self):
+		return self.body
+
+
+# Transaction definition
+class Tx:
+	def __init__(self, n):
+		self.n = n
+		self.hash = hashlib.sha256(str(self.n).encode('utf-8')).hexdigest()
+
+	def __cmp__(self, other):
+		if self.n == other.n:
+			return 0
+		elif self.n < other.n:
+			return -1
+		else:
+			return 1
+
+	def __eq__(self, other):
+		return self.__cmp__(other) == 0
+	def __lt__(self, other):
+		return self.__cmp__(other) < 0
+	def __gt__(self, other):
+		return self.__cmp__(other) > 0
+
+	def getHash(self):
+		return self.hash
 
 # Simulator
 def wrapup(dir):
@@ -568,7 +639,7 @@ def wrapup(dir):
 
 		bc_right = True
 		for b in REAL_BLOCKCHAIN:
-			if b[HEADER][1] not in nodeState[n][BLOCKCHAIN_HASHES] and b[HEADER][1] not in nodeState[n][KNOWN_BLOCKS]:
+			if b.getHash() not in nodeState[n][BLOCKCHAIN_HASHES] and b.getHash() not in nodeState[n][KNOWN_BLOCKS]:
 				bc_right = False
 				bc_wrong += 1
 				break
@@ -684,9 +755,9 @@ def configure(config):
 
 	for n in range(nbNodes):
 		nodeState[n] = createNode(n)
-		nodeState[n][KNOWN_BLOCKS][genesisBlock[HEADER][1]] = genesisBlock
+		nodeState[n][KNOWN_BLOCKS][genesisBlock.getHash()] = genesisBlock
 		nodeState[n][BLOCKCHAIN].append(genesisBlock)
-		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock[HEADER][1]] = genesisBlock
+		nodeState[n][BLOCKCHAIN_HASHES][genesisBlock.getHash()] = genesisBlock
 
 	for i in random.sample(range(nbNodes), miners):
 		MINER_NODES.append(i)
