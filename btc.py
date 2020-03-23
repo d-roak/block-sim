@@ -50,6 +50,21 @@ def init():
 		sim.schedulleExecution(CYCLE, nodeId)
 
 def improve_performance():
+	for b in REAL_BLOCKCHAIN:
+		inv_block = [MSG_BLOCK, b.getHash()]
+		for t in b.getBody():
+			inv_tx = [MSG_TX, t.getHash()]
+			for i in nodeState:
+				if t.getHash() in nodeState[i][KNOWN_TXS]:
+					del nodeState[i][KNOWN_TXS][t.getHash()]
+				for n in nodeState[i][CONNS]:
+					if inv_tx in nodeState[i][CONNS][n][QUEUED_INVS]:
+						nodeState[i][CONNS][n][QUEUED_INVS].remove(inv_tx)
+					if inv_block in nodeState[i][CONNS][n][QUEUED_INVS]:
+						nodeState[i][CONNS][n][QUEUED_INVS].remove(inv_block)
+			del inv_tx
+		del inv_block
+
 	gc.collect()
 	if gc.garbage:
 		gc.garbage[0].set_next(None)
@@ -110,17 +125,17 @@ def CYCLE(self):
 				for t in txs:
 					if t in nodeState[self][QUEUED_TXS]:
 						nodeState[self][QUEUED_TXS].remove(t)
-			if addBlockToBlockchain(REAL_BLOCKCHAIN, block):
-				cleanupTxs(block.getBody())
+			addBlockToBlockchain(REAL_BLOCKCHAIN, block)
 
 		# Stop creating blocks/txs at 90% of cycles
 		if nodeState[self][CURRENT_CYCLE] < 0.9 * nbCycles:
 			# Create transactions
 			if self in TX_NODES[nodeState[self][CURRENT_CYCLE]]:
-				t = hashlib.sha1(str(TX_NUMBER).encode('utf-8')).hexdigest()
+				t = generateTx(TX_NUMBER)
 				TX_NUMBER += 1
+				nodeState[self][KNOWN_TXS][t.getHash()] = t
 				nodeState[self][QUEUED_TXS].append(t)
-				addInvConns(self, self, [MSG_TX, t])
+				addInvConns(self, self, [MSG_TX, t.getHash()])
 
 			# Create block
 			if self in MINER_NODES and len(nodeState[self][QUEUED_TXS]) > minTxPerBlock:
@@ -133,18 +148,13 @@ def CYCLE(self):
 				for n in nodeState[self][CONNS].keys():
 					sim.send(BLOCK, n, self, BLOCK_MSG, b)
 					nodeState[self][DISS_MSGS_SENT] += 1
+				del b
 
 	nodeState[self][CURRENT_CYCLE] += 1
 	nodeState[self][CURRENT_TIME] += nodeCycle
 	if nodeState[self][CURRENT_CYCLE] < nbCycles:
 		sim.schedulleExecution(CYCLE, self)
 
-
-def cleanupTxs(txs):
-	for i in nodeState:
-		for t in nodeState[i][KNOWN_TXS]:
-			if t in txs:
-				nodeState[i][KNOWN_TXS].remove(t)
 
 def join(self):
 	if self not in NETWORK_NODES:
@@ -269,6 +279,7 @@ def INV(self, source, msg, inv):
 	if len(tmp) == 0:
 		return
 	sim.send(GETDATA, source, self, GETDATA_MSG, tmp)
+	del tmp
 	nodeState[self][DISS_MSGS_SENT] += 1
 
 
@@ -332,8 +343,10 @@ def GETDATA(self, source, msg, inv):
 
 	for i in inv:
 		if i[0] == MSG_TX:
-			rmInvConn(self, source, MSG_BLOCK, i[1])
-			sim.send(TX, source, self, TX_MSG, i[1])
+			t = nodeState[self][KNOWN_TXS].get(i[1])
+			rmInvConn(self, source, MSG_TX, t.getHash())
+			sim.send(TX, source, self, TX_MSG, t)
+			del t
 			nodeState[self][DISS_MSGS_SENT] += 1
 		elif i[0] == MSG_BLOCK:
 			b = nodeState[self][KNOWN_BLOCKS].get(i[1])
@@ -341,6 +354,7 @@ def GETDATA(self, source, msg, inv):
 				continue
 			rmInvConn(self, source, MSG_BLOCK, b.getHash())
 			sim.send(BLOCK, source, self, BLOCK_MSG, b)
+			del b
 			nodeState[self][DISS_MSGS_SENT] += 1
 
 
@@ -372,10 +386,10 @@ def TX(self, source, msg, tx):
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
 
 	if verifyTxs(self, tx):
-		if tx not in nodeState[self][KNOWN_TXS]:
-			nodeState[self][KNOWN_TXS].append(tx)
+		if tx.getHash() not in nodeState[self][KNOWN_TXS]:
+			nodeState[self][KNOWN_TXS][tx.getHash()] = tx
 			nodeState[self][QUEUED_TXS].append(tx)
-			addInvConns(self, source, [MSG_TX, tx])
+			addInvConns(self, source, [MSG_TX, tx.getHash()])
 
 
 # Node functions
@@ -397,7 +411,7 @@ def createNode(id):
 	# KNOWN_BLOCKS			# private
 	# QUEUED_BLOCKS
 	
-	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], [], [], dict(), []]
+	node = [0, 0, 0, 0, 0, 0, id, dict(), [], [], [], dict(), [], dict(), []]
 
 	return node
 
@@ -446,7 +460,7 @@ def createSample(self):
 def lifeCheckDBNeighbs(self):
 	# Cycles of 1sec 60*90 = 90min
 	for n in nodeState[self][CONNS]:
-		if nodeState[self][CURRENT_TIME] - nodeState[self][CONNS][n][LAST_PONG] > 60 * 90:
+		if nodeState[self][CURRENT_TIME] - nodeState[self][CONNS][n][LAST_PONG] > 4320:
 			del nodeState[self][CONNS][n]
 
 # Blockchain methods
@@ -489,7 +503,7 @@ def addBlockToBlockchain(blockchain, block):
 		else:		
 			blockchain.append(block)
 			return True
-	
+	del b
 	return False
 
 def addBlockToBlockchain2(blockchain, block):
@@ -676,7 +690,7 @@ def wrapup(dir):
 			"diss_msgs_sent": nodeState[n][DISS_MSGS_SENT],
 			"peer_avg_latency": "%0.1f ms" % (avg_latency),
 			"blockchain_right": bc_right,
-			"blockchain_len": len(nodeState[n][BLOCKCHAIN]),
+			#"blockchain_len": len(nodeState[n][BLOCKCHAIN]),
 			"known_blocks_len": len(nodeState[n][KNOWN_BLOCKS]),
 			#"blockchain_local": blockchain_local,
 			#"known_blocks": known_blocks,
