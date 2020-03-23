@@ -14,6 +14,7 @@ import merkletools
 import statistics
 import time
 import datetime
+#import tracemalloc
 
 from sim import sim
 import utils
@@ -45,6 +46,7 @@ BLOCK_NUMBER = 0
 def init():
 	global nodeState
 
+	#tracemalloc.start()
 	for nodeId in nodeState:
 		REPEATED_BLOCK_COUNT.append({})
 		sim.schedulleExecution(CYCLE, nodeId)
@@ -62,6 +64,7 @@ def improve_performance():
 						nodeState[i][CONNS][n][QUEUED_INVS].remove(inv_tx)
 					if inv_block in nodeState[i][CONNS][n][QUEUED_INVS]:
 						nodeState[i][CONNS][n][QUEUED_INVS].remove(inv_block)
+				# flush databases (last resort)
 			del inv_tx
 		del inv_block
 
@@ -69,6 +72,15 @@ def improve_performance():
 	if gc.garbage:
 		gc.garbage[0].set_next(None)
 		del gc.garbage[:]
+	
+	'''
+	snapshot = tracemalloc.take_snapshot()
+	top_stats = snapshot.statistics('lineno')
+
+	print("[ Top 10 ]")
+	for stat in top_stats[:10]:
+		print(stat)
+	'''
 
 def CYCLE(self):
 	global nodeState, TX_NUMBER, BLOCK_NUMBER
@@ -220,7 +232,8 @@ def VERSION(self, source, msg):
 	if self == source:
 		return
 
-	nodeState[self][DB].append(source)
+	if source not in nodeState[self][DB]:
+		nodeState[self][DB].append(source)
 
 	sim.send(VERACK, source, self, VERACK_MSG)
 	nodeState[self][MEMB_MSGS_SENT] += 1
@@ -237,7 +250,8 @@ def VERACK(self, source, msg):
 def GETADDR(self, source, msg):
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][MEMB_MSGS_RECEIVED] += 1
-	nodeState[self][DB].append(source)
+	if source not in nodeState[self][DB]:
+		nodeState[self][DB].append(source)
 
 	sim.send(ADDR, source, self, ADDR_MSG, createSample(self))
 	nodeState[self][MEMB_MSGS_SENT] += 1
@@ -266,7 +280,8 @@ def INV(self, source, msg, inv):
 	# It can be sent unsolicited to announce new transactions or blocks, or it can be sent in reply to a getblocks message or mempool message.
 	logger.info("Node: {} Received: {} From: {}".format(self, msg, source))
 	nodeState[self][DISS_MSGS_RECEIVED] += 1
-	nodeState[self][DB].append(source)
+	if source not in nodeState[self][DB]:
+		nodeState[self][DB].append(source)
 
 	tmp = []
 	for i in inv:
